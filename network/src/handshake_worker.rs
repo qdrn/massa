@@ -9,14 +9,12 @@ use crate::{
     error::{HandshakeErrorType, NetworkError},
     ReadHalf, WriteHalf,
 };
-use crypto::{
-    hash::Hash,
-    signature::{sign, verify_signature, PrivateKey},
-};
 use futures::future::try_join;
+use massa_hash::hash::Hash;
 use models::node::NodeId;
 use models::Version;
 use rand::{rngs::StdRng, RngCore, SeedableRng};
+use signature::{sign, verify_signature, PrivateKey};
 use time::UTime;
 use tokio::time::timeout;
 
@@ -73,7 +71,7 @@ impl HandshakeWorker {
         // generate random bytes
         let mut self_random_bytes = [0u8; 32];
         StdRng::from_entropy().fill_bytes(&mut self_random_bytes);
-        let self_random_hash = Hash::hash(&self_random_bytes);
+        let self_random_hash = Hash::from(&self_random_bytes);
         // send handshake init future
         let send_init_msg = Message::HandshakeInitiation {
             public_key: self.self_node_id.0,
@@ -132,7 +130,7 @@ impl HandshakeWorker {
         }
 
         // sign their random bytes
-        let other_random_hash = Hash::hash(&other_random_bytes);
+        let other_random_hash = Hash::from(&other_random_bytes);
         let self_signature = sign(&other_random_hash, &self.private_key)?;
 
         // send handshake reply future

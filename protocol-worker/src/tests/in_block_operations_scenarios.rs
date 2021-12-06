@@ -1,15 +1,17 @@
 // Copyright (c) 2021 MASSA LABS <info@massa.net>
 
 use super::tools::protocol_test;
-use crypto::hash::Hash;
+use massa_hash::hash::Hash;
 use models::{
     get_serialization_context, Address, Amount, Block, BlockHeader, BlockHeaderContent, Slot,
 };
+use protocol_exports::tests::tools;
 use protocol_exports::tests::tools::{
     create_and_connect_nodes, create_block_with_operations, create_operation_with_expire_period,
-    create_protocol_config, send_and_propagate_block,
+    send_and_propagate_block,
 };
 use serial_test::serial;
+use signature::{derive_public_key, generate_random_private_key};
 use std::str::FromStr;
 
 #[tokio::test]
@@ -21,9 +23,9 @@ async fn test_protocol_sends_blocks_with_operations_to_consensus() {
     // .timestamp(stderrlog::Timestamp::Millisecond)
     // .init()
     // .unwrap();
-    let protocol_config = create_protocol_config();
+    let protocol_settings = &tools::PROTOCOL_SETTINGS;
     protocol_test(
-        protocol_config,
+        protocol_settings,
         async move |mut network_controller,
                     mut protocol_event_receiver,
                     protocol_command_sender,
@@ -36,14 +38,14 @@ async fn test_protocol_sends_blocks_with_operations_to_consensus() {
 
             let creator_node = nodes.pop().expect("Failed to get node info.");
 
-            let mut private_key = crypto::generate_random_private_key();
-            let mut public_key = crypto::derive_public_key(&private_key);
+            let mut private_key = generate_random_private_key();
+            let mut public_key = derive_public_key(&private_key);
             let mut address = Address::from_public_key(&public_key).unwrap();
             let mut thread = address.get_thread(serialization_context.parent_count);
 
             while thread != 0 {
-                private_key = crypto::generate_random_private_key();
-                public_key = crypto::derive_public_key(&private_key);
+                private_key = generate_random_private_key();
+                public_key = derive_public_key(&private_key);
                 address = Address::from_public_key(&public_key).unwrap();
                 thread = address.get_thread(serialization_context.parent_count);
             }
@@ -116,12 +118,12 @@ async fn test_protocol_sends_blocks_with_operations_to_consensus() {
                 let op = create_operation_with_expire_period(&private_key, 5);
 
                 let block = {
-                    let operation_merkle_root = Hash::hash("merkle root".as_bytes());
+                    let operation_merkle_root = Hash::from("merkle root".as_bytes());
 
                     let (_, header) = BlockHeader::new_signed(
                         &creator_node.private_key,
                         BlockHeaderContent {
-                            creator: crypto::derive_public_key(&creator_node.private_key).clone(),
+                            creator: derive_public_key(&creator_node.private_key),
                             slot: slot_a,
                             parents: Vec::new(),
                             operation_merkle_root,

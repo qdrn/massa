@@ -2,7 +2,7 @@
 
 In Massa, the minimal number of coins required to be able to stake is
 100 MAS (which is called one "roll"). The total initial supply is 500m
-MAS, so in theory, there could be 1 million people staking.
+MAS, so in theory, there could be 5 million people staking.
 
 Addresses are randomly selected to stake (create blocks) in all threads,
 based on the number of rolls they possess. The list of stakers and their
@@ -10,8 +10,8 @@ rolls can be seen [there](https://test.massa.net/#staking).
 
 Rolls can be bought with Massa coins or sold to get the coins back. If
 you already have more than 100 Massa, you can continue this tutorial,
-otherwise, you can ask for coins from us in the
-[Discord](https://discord.com/invite/TnsJQzXkRN) testnet channel.
+otherwise, send your address to the faucet bot in the
+"testnet-faucet" channel of our [Discord](https://discord.com/invite/massa).
 
 ## Buying rolls
 
@@ -53,9 +53,11 @@ You should be selected to create blocks in the different threads.
 
 To check when your address is selected to stake, run this command:
 
-    next_draws <your_address>
+    get_addresses <your_address>
 
-Check that your balance increase, for each block or endorsement that you
+and look at the "next draws" section.
+
+Also check that your balance increases, for each block or endorsement that you
 create you should get a small reward.
 
 ## Selling rolls
@@ -70,6 +72,6 @@ will be frozen for 1 cycle before you can spend them, again check with:
 
     wallet_info
 
-## Next steps
+## Next step
 
--   [Sending transactions](transaction.md).
+-   [Routability tutorial](routability.md) (Optionnal)

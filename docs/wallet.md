@@ -13,6 +13,8 @@ Here is how to create a Massa wallet.
 
 ## From the command line interface
 
+### If your client is not running
+
 Go to the client folder:
 
 ```bash
@@ -28,10 +30,18 @@ cargo run
 It loads the wallet file `wallet.dat`. If it does not exist, it is
 created.
 
-Now generate a new private key (and associated public key/address):
+### If your client is running
+
+Now you can either generate a new private key (and associated public key/address):
 
 ```plain
 wallet_generate_private_key
+```
+
+**or**, add manually an existing private key if you already have one from a previous wallet:
+
+```plain
+wallet_add_private_keys <your_private_key>
 ```
 
 The list of addresses and keys of your wallet can be accessed with:
@@ -44,7 +54,7 @@ wallet_info
 
 If you don't plan to stake or use the command-line client, you can also
 create a wallet on the web interface: head to the
-[explorer](https://test.massa.net), in the wallet part.
+[explorer](https://test.massa.net), in the wallet tab.
 
 Click `Generate private key` then `Add`.
 
@@ -57,9 +67,6 @@ their associated thread and balance.
 Also, if you want to save this wallet and be able to restore it later,
 click `Save wallet`, and next time directly do `Load wallet`.
 
-## Next steps
+## Next step
 
--   Ask testnet coins from us in the
-    [Discord](https://discord.com/invite/TnsJQzXkRN) testnet channel.
 -   [Staking](staking.md) your coins to receive rewards.
--   [Sending transactions](transaction.md).

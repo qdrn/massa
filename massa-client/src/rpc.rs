@@ -1,21 +1,16 @@
 // Copyright (c) 2021 MASSA LABS <info@massa.net>
 
-use std::net::{IpAddr, SocketAddr};
-
 use jsonrpc_core_client::transports::http;
 use jsonrpc_core_client::{RpcChannel, RpcResult, TypedClient};
-
-use crypto::signature::PrivateKey;
 use models::address::{AddressHashMap, AddressHashSet};
 use models::api::{
     AddressInfo, BlockInfo, BlockSummary, EndorsementInfo, NodeStatus, OperationInfo, TimeInterval,
 };
 use models::clique::Clique;
-use models::crypto::PubkeySig;
+use models::massa_hash::PubkeySig;
 use models::{Address, BlockId, EndorsementId, Operation, OperationId};
-
-// TODO: This crate should at some point be renamed `client`, `massa` or `massa-client`
-// and replace the previous one!
+use signature::PrivateKey;
+use std::net::{IpAddr, SocketAddr};
 
 pub struct Client {
     pub public: RpcClient,
@@ -35,7 +30,6 @@ impl Client {
     }
 }
 
-// TODO: Did we crate 2 RpcClient structs? (to separate public/private calls in impl)
 pub struct RpcClient(TypedClient);
 
 /// This is required by `jsonrpc_core_client::transports::http::connect`
@@ -58,7 +52,7 @@ impl From<RpcChannel> for RpcClient {
 impl RpcClient {
     /// Default constructor
     pub(crate) async fn from_url(url: &str) -> RpcClient {
-        match http::connect::<RpcClient>(&url).await {
+        match http::connect::<RpcClient>(url).await {
             Ok(client) => client,
             Err(_) => panic!("Unable to connect to Node."),
         }
@@ -166,10 +160,10 @@ impl RpcClient {
             .await
     }
 
-    /// Get information on a block given its hash
-    pub(crate) async fn get_blocks(&self, block_ids: Vec<BlockId>) -> RpcResult<Vec<BlockInfo>> {
+    /// Get information on a block given its BlockId
+    pub(crate) async fn get_block(&self, block_id: BlockId) -> RpcResult<BlockInfo> {
         self.0
-            .call_method("get_blocks", "BlockInfo", vec![block_ids])
+            .call_method("get_block", "BlockInfo", vec![block_id])
             .await
     }
 

@@ -2,19 +2,17 @@
 
 use super::mock_network_controller::MockNetworkController;
 use crate::{
-    ProtocolConfig, ProtocolEvent, ProtocolEventReceiver, ProtocolPoolEvent,
-    ProtocolPoolEventReceiver,
+    ProtocolEvent, ProtocolEventReceiver, ProtocolPoolEvent, ProtocolPoolEventReceiver,
+    ProtocolSettings,
 };
-use crypto::{
-    hash::Hash,
-    signature::{derive_public_key, generate_random_private_key, PrivateKey, PublicKey},
-};
+use massa_hash::hash::Hash;
 use models::node::NodeId;
 use models::{
     Address, Amount, Block, BlockHeader, BlockHeaderContent, BlockId, SerializeCompact, Slot,
 };
 use models::{Endorsement, EndorsementContent, Operation, OperationContent, OperationType};
 use network::NetworkCommand;
+use signature::{derive_public_key, generate_random_private_key, sign, PrivateKey, PublicKey};
 use std::collections::HashMap;
 use time::UTime;
 use tokio::time::sleep;
@@ -52,13 +50,13 @@ pub fn create_block(private_key: &PrivateKey, public_key: &PublicKey) -> Block {
     let (_, header) = BlockHeader::new_signed(
         private_key,
         BlockHeaderContent {
-            creator: public_key.clone(),
+            creator: *public_key,
             slot: Slot::new(1, 0),
             parents: vec![
-                BlockId(Hash::hash("Genesis 0".as_bytes())),
-                BlockId(Hash::hash("Genesis 1".as_bytes())),
+                BlockId(Hash::from("Genesis 0".as_bytes())),
+                BlockId(Hash::from("Genesis 1".as_bytes())),
             ],
-            operation_merkle_root: Hash::hash(&Vec::new()),
+            operation_merkle_root: Hash::from(&Vec::new()),
             endorsements: Vec::new(),
         },
     )
@@ -76,20 +74,19 @@ pub fn create_block_with_operations(
     slot: Slot,
     operations: Vec<Operation>,
 ) -> Block {
-    let operation_merkle_root = Hash::hash(
+    let operation_merkle_root = Hash::from(
         &operations.iter().fold(Vec::new(), |acc, v| {
-            let res = [acc, v.get_operation_id().unwrap().to_bytes().to_vec()].concat();
-            res
+            [acc, v.get_operation_id().unwrap().to_bytes().to_vec()].concat()
         })[..],
     );
     let (_, header) = BlockHeader::new_signed(
         private_key,
         BlockHeaderContent {
-            creator: public_key.clone(),
+            creator: *public_key,
             slot,
             parents: vec![
-                BlockId(Hash::hash("Genesis 0".as_bytes())),
-                BlockId(Hash::hash("Genesis 1".as_bytes())),
+                BlockId(Hash::from("Genesis 0".as_bytes())),
+                BlockId(Hash::from("Genesis 1".as_bytes())),
             ],
             operation_merkle_root,
             endorsements: Vec::new(),
@@ -109,13 +106,13 @@ pub fn create_block_with_endorsements(
     let (_, header) = BlockHeader::new_signed(
         private_key,
         BlockHeaderContent {
-            creator: public_key.clone(),
+            creator: *public_key,
             slot,
             parents: vec![
-                BlockId(Hash::hash("Genesis 0".as_bytes())),
-                BlockId(Hash::hash("Genesis 1".as_bytes())),
+                BlockId(Hash::from("Genesis 0".as_bytes())),
+                BlockId(Hash::from("Genesis 1".as_bytes())),
             ],
-            operation_merkle_root: Hash::hash(&Vec::new()),
+            operation_merkle_root: Hash::from(&Vec::new()),
             endorsements,
         },
     )
@@ -163,21 +160,18 @@ pub async fn send_and_propagate_block(
 /// Creates an endorsement for use in protocol tests,
 /// without paying attention to consensus related things.
 pub fn create_endorsement() -> Endorsement {
-    let sender_priv = crypto::generate_random_private_key();
-    let sender_public_key = crypto::derive_public_key(&sender_priv);
+    let sender_priv = generate_random_private_key();
+    let sender_public_key = derive_public_key(&sender_priv);
 
     let content = EndorsementContent {
         sender_public_key,
         slot: Slot::new(10, 1),
         index: 0,
-        endorsed_block: BlockId(Hash::hash(&[])),
+        endorsed_block: BlockId(Hash::from(&[])),
     };
-    let hash = Hash::hash(&content.to_bytes_compact().unwrap());
-    let signature = crypto::sign(&hash, &sender_priv).unwrap();
-    Endorsement {
-        content: content.clone(),
-        signature,
-    }
+    let hash = Hash::from(&content.to_bytes_compact().unwrap());
+    let signature = sign(&hash, &sender_priv).unwrap();
+    Endorsement { content, signature }
 }
 
 // Create an operation, from a specific sender, and with a specific expire period.
@@ -185,10 +179,10 @@ pub fn create_operation_with_expire_period(
     sender_priv: &PrivateKey,
     expire_period: u64,
 ) -> Operation {
-    let sender_pub = crypto::derive_public_key(sender_priv);
+    let sender_pub = derive_public_key(sender_priv);
 
-    let recv_priv = crypto::generate_random_private_key();
-    let recv_pub = crypto::derive_public_key(&recv_priv);
+    let recv_priv = generate_random_private_key();
+    let recv_pub = derive_public_key(&recv_priv);
 
     let op = OperationType::Transaction {
         recipient_address: Address::from_public_key(&recv_pub).unwrap(),
@@ -200,14 +194,18 @@ pub fn create_operation_with_expire_period(
         sender_public_key: sender_pub,
         expire_period,
     };
-    let hash = Hash::hash(&content.to_bytes_compact().unwrap());
-    let signature = crypto::sign(&hash, sender_priv).unwrap();
+    let hash = Hash::from(&content.to_bytes_compact().unwrap());
+    let signature = sign(&hash, sender_priv).unwrap();
 
     Operation { content, signature }
 }
 
+lazy_static::lazy_static! {
+    pub static ref PROTOCOL_SETTINGS: ProtocolSettings = create_protocol_settings();
+}
+
 // create a ProtocolConfig with typical values
-pub fn create_protocol_config() -> ProtocolConfig {
+pub fn create_protocol_settings() -> ProtocolSettings {
     // Init the serialization context with a default,
     // can be overwritten with a more specific one in the test.
     models::init_serialization_context(models::SerializationContext {
@@ -226,10 +224,10 @@ pub fn create_protocol_config() -> ProtocolConfig {
         max_bootstrap_message_size: 100000000,
         max_bootstrap_pos_entries: 1000,
         max_bootstrap_pos_cycles: 5,
-        max_block_endorsments: 8,
+        max_block_endorsements: 8,
     });
 
-    ProtocolConfig {
+    ProtocolSettings {
         ask_block_timeout: 500.into(),
         max_node_known_blocks_size: 100,
         max_node_wanted_blocks_size: 100,

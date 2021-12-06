@@ -12,10 +12,10 @@ use tokio::{
 };
 use tracing::{debug, error, info, warn};
 
-use crypto::signature::{derive_public_key, generate_random_private_key, PrivateKey};
 use models::stats::NetworkStats;
-use models::{crypto::PubkeySig, node::NodeId};
+use models::{massa_hash::PubkeySig, node::NodeId};
 use models::{Block, BlockHeader, BlockId, Endorsement, Operation, Version};
+use signature::{derive_public_key, generate_random_private_key, PrivateKey};
 
 use crate::error::NetworkError;
 
@@ -163,7 +163,7 @@ impl NetworkCommandSender {
         self.0
             .send(NetworkCommand::BanIp(ips))
             .await
-            .map_err(|_| NetworkError::ChannelError("could not send Ban command".into()))?;
+            .map_err(|_| NetworkError::ChannelError("could not send BanIp command".into()))?;
         Ok(())
     }
 

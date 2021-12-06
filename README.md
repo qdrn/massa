@@ -4,6 +4,11 @@ Massa is a truly decentralized blockchain controlled by thousands of
 people. With the breakthrough multithreaded technology, we're set for
 mass adoption.
 
+[![CI](https://github.com/massalabs/massa/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/massalabs/massa/actions/workflows/ci.yml?query=branch%3Amain)
+[![Bors enabled](https://bors.tech/images/badge_small.svg)](https://app.bors.tech/repositories/39543)
+[![Coverage Status](https://coveralls.io/repos/github/massalabs/massa/badge.svg?branch=main)](https://coveralls.io/github/massalabs/massa?branch=main)
+[![Docs](https://img.shields.io/static/v1?label=Docs&message=docs.massa.net&color=blue)](https://massalabs.github.io/massa/massa_node/)
+
 ## Introduction
 
 [Massa](https://massa.net) is a new blockchain reaching a high
@@ -30,93 +35,30 @@ rules](docs/testnet_rules.md).
 
 ## Testnet Discussions
 
-Please come to our [Discord](https://discord.com/invite/TnsJQzXkRN) for
+Please come to our [Discord](https://discord.com/invite/massa) for
 testnet discussions, in the testnet channel.
 
 For project announcements, we mainly use
-[Telegram](https://t.me/massanetwork).
+[Telegram](https://t.me/massanetwork), and we also have a [Twitter](https://twitter.com/MassaLabs) account.
 
-## Install
+## Tutorials to follow to join the testnet
 
-If you just wish to run a Massa node without compiling it yourself, you
-can run the latest binary:
-
--   [Windows
-    executable](https://gitlab.com/massalabs/massa/-/jobs/artifacts/testnet/download?job=build-windows)
--   [Linux
-    binary](https://gitlab.com/massalabs/massa/-/jobs/artifacts/testnet/download?job=build-linux)
--   [MacOS
-    binary](https://gitlab.com/massalabs/massa/-/jobs/artifacts/testnet/download?job=build-darwin)
-
-### On Windows
-
-Please go to the [Install and Run on Windows](docs/windows_install.md)
-page.
-
-### On Ubuntu / MacOS
-
--   on Ubuntu, these libs must be installed:
-    `sudo apt install pkg-config curl git build-essential libssl-dev`
--   install [rustup](https://www.rust-lang.org/tools/install):
-    `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
--   configure path: `source $HOME/.cargo/env`
--   check rust version: `rustc --version`
--   install
-    [nigthly](https://doc.rust-lang.org/edition-guide/rust-2018/rustup-for-managing-rust-versions.html):
-    `rustup toolchain install nightly`
--   set it as default: `rustup default nightly`
--   check rust version: `rustc --version`
--   clone this repo:
-    `git clone --branch testnet https://gitlab.com/massalabs/massa.git`
-
-## Run
-
-### Start the node
-
-On a first window:
-
-    cd massa/massa-node/
-
-Launch the node, on Ubuntu:
-
-    RUST_BACKTRACE=full cargo run --release |& tee logs.txt
-
-On macOS:
-
-    RUST_BACKTRACE=full cargo run --release > logs.txt 2>&1
-
-### Start the client
-
-On a second window:
-
-    cd massa/massa-client/
-    cargo run --release
-
-## Update
-
-    cd massa/
-    git stash
-    git checkout testnet
-    git pull
-
-## Tutorials
-
-Here is a set of tutorials:
-
+-   [Installing a node](docs/install.md)
+-   [Running a node](docs/run.md)
 -   [Creating a wallet](docs/wallet.md)
 -   [Staking](docs/staking.md)
--   [Sending transactions](docs/transaction.md)
--   [Install and Run on Windows](docs/windows_install.md)
--   [Routability tutorial](docs/routability.md)
--   [Testnet rewards program](docs/testnet_rules.md)
--   To get testnet coins, send your address to the faucet bot in the
-    "testnet-token-request" channel of our
-    [Discord](https://discord.com/invite/TnsJQzXkRN).
+-   [Routability tutorial](docs/routability.md) (Optionnal)
+-   [Testnet rewards program](docs/testnet_rules.md) (Optionnal)
 
-## FAQ and Troubleshooting
+## More tutorials
+
+-   [Updating the node](docs/update.md)
+-   [Sending transactions](docs/transaction.md)
+
+## [FAQ](docs/faq.md) and Troubleshooting
 
 You'll find answers to common issues and questions regarding the Massa
 protocol in the [FAQ](docs/faq.md).
 
 Don't hesitate to ask questions in the
-[Discord](https://discord.com/invite/TnsJQzXkRN) testnet channel.
+[Discord](https://discord.com/invite/massa) testnet channel.

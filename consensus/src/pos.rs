@@ -3,7 +3,7 @@
 use crate::error::ConsensusError;
 use crate::{block_graph::ActiveBlock, ConsensusConfig};
 use bitvec::prelude::*;
-use crypto::hash::Hash;
+use massa_hash::hash::Hash;
 use models::address::{AddressHashMap, AddressHashSet};
 use models::hhasher::BuildHHasher;
 use models::{
@@ -12,11 +12,13 @@ use models::{
     SerializeVarInt, Slot, StakersCycleProductionStats, ADDRESS_SIZE_BYTES,
 };
 use num::rational::Ratio;
+use num::Integer;
 use rand::distributions::Uniform;
 use rand::Rng;
 use rand_xoshiro::rand_core::SeedableRng;
 use rand_xoshiro::Xoshiro256PlusPlus;
 use serde::{Deserialize, Serialize};
+use signature::derive_public_key;
 use std::collections::{btree_map, hash_map, BTreeMap, HashMap, VecDeque};
 use std::convert::TryInto;
 use tracing::warn;
@@ -68,7 +70,7 @@ impl DeserializeCompact for RollUpdate {
 }
 
 impl RollUpdate {
-    // chain two roll updates, compensate and return compensation count
+    /// chain two roll updates, compensate and return compensation count
     fn chain(&mut self, change: &Self) -> Result<RollCompensation, ConsensusError> {
         let compensation_other = std::cmp::min(change.roll_purchases, change.roll_sales);
         self.roll_purchases = self
@@ -92,7 +94,7 @@ impl RollUpdate {
         Ok(RollCompensation(compensation_total))
     }
 
-    // compensate a roll update, return compensation count
+    /// compensate a roll update, return compensation count
     pub fn compensate(&mut self) -> RollCompensation {
         let compensation = std::cmp::min(self.roll_purchases, self.roll_sales);
         self.roll_purchases -= compensation;
@@ -113,7 +115,7 @@ impl RollUpdates {
         self.0.keys().copied().collect()
     }
 
-    // chains with another RollUpdates, compensates and returns compensations
+    /// chains with another RollUpdates, compensates and returns compensations
     pub fn chain(
         &mut self,
         updates: &RollUpdates,
@@ -131,7 +133,7 @@ impl RollUpdates {
         Ok(res)
     }
 
-    // applyes a RollUpdate, compensates and returns compensation
+    /// applies a RollUpdate, compensates and returns compensation
     pub fn apply(
         &mut self,
         addr: &Address,
@@ -151,6 +153,7 @@ impl RollUpdates {
         }
     }
 
+    /// get the roll update for a subset of addresses
     pub fn clone_subset(&self, addrs: &AddressHashSet) -> Self {
         Self(
             addrs
@@ -185,7 +188,7 @@ impl RollCounts {
         self.0.len()
     }
 
-    // applies RollUpdates to self with compensations
+    /// applies RollUpdates to self with compensations
     pub fn apply_updates(&mut self, updates: &RollUpdates) -> Result<(), ConsensusError> {
         for (addr, update) in updates.0.iter() {
             match self.0.entry(*addr) {
@@ -226,6 +229,7 @@ impl RollCounts {
         Ok(())
     }
 
+    /// get roll counts for a subset of addresses.
     pub fn clone_subset(&self, addrs: &AddressHashSet) -> Self {
         Self(
             addrs
@@ -248,7 +252,9 @@ impl RollCounts {
     }
 }
 
+/// Roll specific method on operation
 pub trait OperationRollInterface {
+    /// get roll related modifications
     fn get_roll_updates(&self) -> Result<RollUpdates, ConsensusError>;
 }
 
@@ -313,11 +319,11 @@ pub struct ProofOfStake {
     draw_cache_counter: usize,
     /// Initial rolls: we keep them as long as negative cycle draws are needed
     initial_rolls: Option<Vec<RollCounts>>,
-    // Initial seeds: they are lightweight, we always keep them
-    // the seed for cycle -N is obtained by hashing N times the value ConsensusConfig.initial_draw_seed
-    // the seeds are indexed from -1 to -N
+    /// Initial seeds: they are lightweight, we always keep them
+    /// the seed for cycle -N is obtained by hashing N times the value ConsensusConfig.initial_draw_seed
+    /// the seeds are indexed from -1 to -N
     initial_seeds: Vec<Vec<u8>>,
-    // watched addresses
+    /// watched addresses
     watched_addresses: AddressHashSet,
 }
 
@@ -497,7 +503,13 @@ impl DeserializeCompact for ThreadCycleState {
                 "invalid number entries when deserializing ExportThreadCycleStat rng_seed".into(),
             ));
         }
-        let mut rng_seed: BitVec<Lsb0, u8> = BitVec::try_from_vec(buffer[cursor..].to_vec())
+        let bits_u8_len = n_entries.div_ceil(&u8::BITS) as usize;
+        if buffer[cursor..].len() < bits_u8_len {
+            return Err(ModelsError::SerializeError(
+                "too few remaining bytes when deserializing ExportThreadCycleStat rng_seed".into(),
+            ));
+        }
+        let mut rng_seed: BitVec<Lsb0, u8> = BitVec::try_from_vec(buffer[cursor..(cursor+bits_u8_len)].to_vec())
             .map_err(|_| ModelsError::SerializeError("error in bitvec conversion during deserialization of ExportThreadCycleStat rng_seed".into()))?;
         rng_seed.truncate(n_entries as usize);
         if rng_seed.len() != n_entries as usize {
@@ -611,12 +623,13 @@ impl ProofOfStake {
         self.watched_addresses = addrs;
     }
 
-    /// stakers count at latest final blocks
-    pub fn get_stakers_count(&self) -> u64 {
-        self.cycle_states.iter().fold(0, |acc, cycle_states| {
-            let state = &cycle_states[0];
-            acc + state.roll_count.len() as u64
-        })
+    /// active stakers count
+    pub fn get_stakers_count(&self, target_cycle: u64) -> Result<u64, ConsensusError> {
+        let mut res: u64 = 0;
+        for thread in 0..self.cfg.thread_count {
+            res += self.get_lookback_roll_count(target_cycle, thread)?.0.len() as u64;
+        }
+        Ok(res)
     }
 
     async fn get_initial_rolls(cfg: &ConsensusConfig) -> Result<Vec<RollCounts>, ConsensusError> {
@@ -634,7 +647,7 @@ impl ProofOfStake {
         let mut cur_seed = cfg.initial_draw_seed.as_bytes().to_vec();
         let mut initial_seeds = Vec::with_capacity((cfg.pos_lookback_cycles + 1) as usize);
         for _ in 0..(cfg.pos_lookback_cycles + 1) {
-            cur_seed = Hash::hash(&cur_seed).to_bytes().to_vec();
+            cur_seed = Hash::from(&cur_seed).to_bytes().to_vec();
             initial_seeds.push(cur_seed.clone());
         }
         initial_seeds
@@ -726,7 +739,7 @@ impl ProofOfStake {
                 }
             }
             // compute the RNG seed from the seed bits
-            let rng_seed = Hash::hash(&rng_seed_bits.into_vec()).to_bytes().to_vec();
+            let rng_seed = Hash::from(&rng_seed_bits.into_vec()).to_bytes().to_vec();
 
             (cum_sum, rng_seed)
         } else {
@@ -774,9 +787,7 @@ impl ProofOfStake {
         let cycle_last_period = (cycle + 1) * self.cfg.periods_per_cycle - 1;
         if cycle_first_period == 0 {
             // genesis slots: force block creator and endorsement creator address draw
-            let genesis_addr = Address::from_public_key(&crypto::signature::derive_public_key(
-                &self.cfg.genesis_key,
-            ))?;
+            let genesis_addr = Address::from_public_key(&derive_public_key(&self.cfg.genesis_key))?;
             for draw_thread in 0..self.cfg.thread_count {
                 draws.insert(
                     Slot::new(0, draw_thread),
@@ -978,7 +989,7 @@ impl ProofOfStake {
 
     pub fn get_stakers_production_stats(
         &self,
-        addrs: AddressHashSet,
+        addrs: &AddressHashSet,
     ) -> Vec<StakersCycleProductionStats> {
         let mut res: HashMap<u64, StakersCycleProductionStats> = HashMap::new();
         let mut completeness: HashMap<u64, u8> = HashMap::new();
@@ -999,17 +1010,17 @@ impl ProofOfStake {
                 cycle_entry.is_final = if thread_cycle_complete {
                     *completeness
                         .entry(cycle)
-                        .and_modify(|n| *n = *n + 1)
+                        .and_modify(|n| *n += 1)
                         .or_insert(1)
                         == self.cfg.thread_count
                 } else {
                     false
                 };
 
-                for addr in &addrs {
+                for addr in addrs {
                     let (n_ok, n_nok) = thread_cycle_info
                         .production_stats
-                        .get(&addr)
+                        .get(addr)
                         .unwrap_or(&(0, 0));
                     cycle_entry
                         .ok_nok_counts

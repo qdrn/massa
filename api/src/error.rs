@@ -1,12 +1,11 @@
 // Copyright (c) 2021 MASSA LABS <info@massa.net>
 
 use consensus::ConsensusError;
-use crypto::CryptoError;
 use displaydoc::Display;
+use massa_hash::MassaHashError;
 use models::ModelsError;
 use network::NetworkError;
 use pool::PoolError;
-use storage::StorageError;
 use thiserror::Error;
 use time::TimeError;
 
@@ -15,14 +14,14 @@ use time::TimeError;
 pub enum ApiError {
     /// pool error: {0}
     PoolError(#[from] PoolError),
-    /// storage error: {0}
-    StorageError(#[from] StorageError),
+    /// too many arguments error: {0}
+    TooManyArguments(String),
     /// send channel error: {0}
     SendChannelError(String),
     /// receive channel error: {0}
     ReceiveChannelError(String),
-    /// crypto error: {0}
-    CryptoError(#[from] CryptoError),
+    /// massa_hash error: {0}
+    MassaHashError(#[from] MassaHashError),
     /// consensus error: {0}
     ConsensusError(#[from] ConsensusError),
     /// network error: {0}

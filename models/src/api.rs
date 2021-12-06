@@ -1,5 +1,7 @@
 // Copyright (c) 2021 MASSA LABS <info@massa.net>
 
+use crate::address::AddressCycleProductionStats;
+use crate::ledger::LedgerData;
 use crate::node::NodeId;
 use crate::stats::{ConsensusStats, NetworkStats, PoolStats};
 use crate::{
@@ -112,17 +114,21 @@ impl std::fmt::Display for OperationInfo {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Copy)]
-pub struct BalanceInfo {
-    pub final_balance: Amount,
-    pub candidate_balance: Amount,
+pub struct LedgerInfo {
+    pub final_ledger_info: LedgerData,
+    pub candidate_ledger_info: LedgerData,
     pub locked_balance: Amount,
 }
 
-impl std::fmt::Display for BalanceInfo {
+impl std::fmt::Display for LedgerInfo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, "Final balance: {}", self.final_balance)?;
-        writeln!(f, "Candidate balance: {}", self.candidate_balance)?;
-        writeln!(f, "Locked balance: {}", self.locked_balance)?;
+        writeln!(f, "\tFinal balance: {}", self.final_ledger_info.balance)?;
+        writeln!(
+            f,
+            "\tCandidate balance: {}",
+            self.candidate_ledger_info.balance
+        )?;
+        writeln!(f, "\tLocked balance: {}", self.locked_balance)?;
         Ok(())
     }
 }
@@ -136,9 +142,9 @@ pub struct RollsInfo {
 
 impl std::fmt::Display for RollsInfo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, "Active rolls: {}", self.active_rolls)?;
-        writeln!(f, "Final rolls: {}", self.final_rolls)?;
-        writeln!(f, "Candidate rolls: {}", self.candidate_rolls)?;
+        writeln!(f, "\tActive rolls: {}", self.active_rolls)?;
+        writeln!(f, "\tFinal rolls: {}", self.final_rolls)?;
+        writeln!(f, "\tCandidate rolls: {}", self.candidate_rolls)?;
         Ok(())
     }
 }
@@ -147,26 +153,21 @@ impl std::fmt::Display for RollsInfo {
 pub struct AddressInfo {
     pub address: Address,
     pub thread: u8,
-    pub balance: BalanceInfo,
+    pub ledger_info: LedgerInfo,
     pub rolls: RollsInfo,
     pub block_draws: HashSet<Slot>,
-    pub endorsement_draws: HashMap<String, u64>, // u64 is the index
+    pub endorsement_draws: HashSet<IndexedSlot>,
     pub blocks_created: BlockHashSet,
     pub involved_in_endorsements: EndorsementHashSet,
     pub involved_in_operations: OperationHashSet,
-    pub is_staking: bool,
+    pub production_stats: Vec<AddressCycleProductionStats>,
 }
 
 impl std::fmt::Display for AddressInfo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(
-            f,
-            "Address: {}{}",
-            self.address,
-            display_if_true(self.is_staking, "staking"),
-        )?;
+        writeln!(f, "Address: {}", self.address)?;
         writeln!(f, "Thread: {}", self.thread)?;
-        writeln!(f, "Balance:\n{}", self.balance)?;
+        writeln!(f, "Balance:\n{}", self.ledger_info)?;
         writeln!(f, "Rolls:\n{}", self.rolls)?;
         writeln!(
             f,
@@ -180,8 +181,7 @@ impl std::fmt::Display for AddressInfo {
             "Endorsement draws: {}",
             self.endorsement_draws
                 .iter()
-                .map(|(slot, idx)| format!("    {}: index {}", slot, idx))
-                .fold("\n".to_string(), |acc, s| format!("{}{}", acc, s))
+                .fold("\n".to_string(), |acc, s| format!("{}    {}", acc, s))
         )?;
         writeln!(
             f,
@@ -204,6 +204,24 @@ impl std::fmt::Display for AddressInfo {
                 .iter()
                 .fold("\n".to_string(), |acc, s| format!("{}    {}", acc, s))
         )?;
+        writeln!(f, "Production stats:")?;
+        let mut sorted_production_stats = self.production_stats.clone();
+        sorted_production_stats.sort_unstable_by_key(|v| v.cycle);
+        for cycle_stat in sorted_production_stats.into_iter() {
+            writeln!(
+                f,
+                "\t produced {} and failed {} at cycle {} {}",
+                cycle_stat.ok_count,
+                cycle_stat.nok_count,
+                cycle_stat.cycle,
+                if cycle_stat.is_final {
+                    "(final)"
+                } else {
+                    "(non-final)"
+                }
+            )?;
+        }
+
         Ok(())
     }
 }
@@ -213,29 +231,36 @@ impl AddressInfo {
         CompactAddressInfo {
             address: self.address,
             thread: self.thread,
-            balance: self.balance,
+            balance: self.ledger_info,
             rolls: self.rolls,
-            is_staking: self.is_staking,
         }
     }
 }
 
+/// When an address is drawn to create an endorsement it is selected for a specific index
+#[derive(Debug, Deserialize, Serialize, Hash, PartialEq, Eq)]
+pub struct IndexedSlot {
+    pub slot: Slot,
+    pub index: usize,
+}
+
+impl std::fmt::Display for IndexedSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "Slot: {}, Index: {}", self.slot, self.index)
+    }
+}
+
+#[derive(Serialize)]
 pub struct CompactAddressInfo {
     pub address: Address,
     pub thread: u8,
-    pub balance: BalanceInfo,
+    pub balance: LedgerInfo,
     pub rolls: RollsInfo,
-    pub is_staking: bool,
 }
 
 impl std::fmt::Display for CompactAddressInfo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(
-            f,
-            "Address: {}{}",
-            self.address,
-            display_if_true(self.is_staking, "staking"),
-        )?;
+        writeln!(f, "Address: {}", self.address)?;
         writeln!(f, "Thread: {}", self.thread)?;
         writeln!(f, "Balance:\n{}", self.balance)?;
         writeln!(f, "Rolls:\n{}", self.rolls)?;
@@ -243,18 +268,29 @@ impl std::fmt::Display for CompactAddressInfo {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct EndorsementInfo {
-    id: EndorsementId,
-    in_pool: bool,
-    in_blocks: Vec<BlockId>,
-    is_final: bool,
-    endorsement: Endorsement,
+    pub id: EndorsementId,
+    pub in_pool: bool,
+    pub in_blocks: Vec<BlockId>,
+    pub is_final: bool,
+    pub endorsement: Endorsement,
 }
 
 impl std::fmt::Display for EndorsementInfo {
-    fn fmt(&self, _f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        todo!() // TODO: wait for !238
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "Endorsement id: {}", self.id)?;
+        display_if_true(self.is_final, "final");
+        display_if_true(self.in_pool, "in pool");
+        writeln!(
+            f,
+            "In blocks: {}",
+            self.in_blocks
+                .iter()
+                .fold("\n".to_string(), |acc, s| format!("{}    {}", acc, s))
+        )?;
+        writeln!(f, "Endorsement: {}", self.endorsement)?;
+        Ok(())
     }
 }
 
@@ -338,8 +374,9 @@ pub struct TimeInterval {
 }
 
 #[derive(Debug, Deserialize, Clone, Copy)]
-pub struct APIConfig {
+pub struct APISettings {
     pub draw_lookahead_period_count: u64,
     pub bind_private: SocketAddr,
     pub bind_public: SocketAddr,
+    pub max_arguments: u64,
 }

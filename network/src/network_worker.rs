@@ -10,18 +10,18 @@ use super::{
     peer_info_database::*,
 };
 use crate::error::{HandshakeErrorType, NetworkError};
-use crypto::hash::Hash;
-use crypto::signature::{derive_public_key, sign, PrivateKey};
 use futures::{stream::FuturesUnordered, StreamExt};
 use logging::massa_trace;
+use massa_hash::hash::Hash;
 use models::stats::NetworkStats;
-use models::{crypto::PubkeySig, node::NodeId};
+use models::{massa_hash::PubkeySig, node::NodeId};
 use models::{
     with_serialization_context, DeserializeCompact, DeserializeVarInt, ModelsError,
     SerializeCompact, SerializeVarInt, Version,
 };
 use models::{Block, BlockHeader, BlockId, Endorsement, Operation};
 use serde::{Deserialize, Serialize};
+use signature::{derive_public_key, sign, PrivateKey};
 use std::{
     collections::{hash_map, HashMap, HashSet},
     convert::TryInto,
@@ -821,16 +821,15 @@ impl NetworkWorker {
                     .collect();
 
                 // HashMap<NodeId, (ConnectionId, mpsc::Sender<NodeCommand>)
-                response_tx
+                if response_tx
                     .send(Peers {
                         peers,
                         our_node_id: self.self_node_id,
                     })
-                    .map_err(|_| {
-                        NetworkError::ChannelError(
-                            "could not send GetPeersChannelError upstream".into(),
-                        )
-                    })?;
+                    .is_err()
+                {
+                    warn!("network: could not send GetPeersChannelError upstream");
+                }
             }
             NetworkCommand::GetBootstrapPeers(response_tx) => {
                 massa_trace!(
@@ -838,11 +837,9 @@ impl NetworkWorker {
                     {}
                 );
                 let peer_list = self.peer_info_db.get_advertisable_peer_ips();
-                response_tx.send(BootstrapPeers(peer_list)).map_err(|_| {
-                    NetworkError::ChannelError(
-                        "could not send GetBootstrapPeers response upstream".into(),
-                    )
-                })?;
+                if response_tx.send(BootstrapPeers(peer_list)).is_err() {
+                    warn!("network: could not send GetBootstrapPeers response upstream");
+                }
             }
             NetworkCommand::BlockNotFound { node, block_id } => {
                 massa_trace!(
@@ -882,26 +879,25 @@ impl NetworkWorker {
                     "network_worker.manage_network_command receive NetworkCommand::NodeSignMessage",
                     { "mdg": msg }
                 );
-                let signature = sign(&Hash::hash(&msg), &self.private_key)?;
+                let signature = sign(&Hash::from(&msg), &self.private_key)?;
                 let public_key = derive_public_key(&self.private_key);
-                response_tx
+                if response_tx
                     .send(PubkeySig {
                         public_key,
                         signature,
                     })
-                    .map_err(|_| {
-                        NetworkError::ChannelError(
-                            "could not send NodeSignMessage response upstream".into(),
-                        )
-                    })?;
+                    .is_err()
+                {
+                    warn!("network: could not send NodeSignMessage response upstream");
+                }
             }
             NetworkCommand::Unban(ip) => self.peer_info_db.unban(ip).await?,
             NetworkCommand::GetStats { response_tx } => {
                 let res = NetworkStats {
                     in_connection_count: self.peer_info_db.active_in_nonbootstrap_connections
-                        as u64, // TODO: add bootstrap connections
+                        as u64, // TODO: add bootstrap connections ... see #1312
                     out_connection_count: self.peer_info_db.active_out_nonbootstrap_connections
-                        as u64, // TODO: add bootstrap connections
+                        as u64, // TODO: add bootstrap connections ... see #1312
                     known_peer_count: self.peer_info_db.peers.len() as u64,
                     banned_peer_count: self
                         .peer_info_db
@@ -911,11 +907,9 @@ impl NetworkWorker {
                         .fold(0, |acc, _| acc + 1),
                     active_node_count: self.active_nodes.len() as u64,
                 };
-                response_tx.send(res).map_err(|_| {
-                    NetworkError::ChannelError(
-                        "could not send NodeSignMessage response upstream".into(),
-                    )
-                })?;
+                if response_tx.send(res).is_err() {
+                    warn!("network: could not send NodeSignMessage response upstream");
+                }
             }
         }
         Ok(())
@@ -929,10 +923,10 @@ impl NetworkWorker {
     ) {
         if let Some((_, node_command_tx)) = self.active_nodes.get(node) {
             if node_command_tx.send(message).await.is_err() {
-                warn!(
+                debug!(
                     "{}",
-                    NetworkError::ChannelError("error forwarding message to node worker".into(),)
-                )
+                    NetworkError::ChannelError("contact with node worker lost while trying to send it a message. Probably a peer disconnect.".into())
+                );
             };
         } else {
             // We probably weren't able to send this event previously,

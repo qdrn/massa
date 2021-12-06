@@ -3,9 +3,10 @@
 // RUST_BACKTRACE=1 cargo test test_block_validity -- --nocapture
 
 use crate::tests::tools::{self, generate_ledger_file};
-use crypto::hash::Hash;
+use massa_hash::hash::Hash;
 use models::{BlockId, Slot};
 use serial_test::serial;
+use signature::{generate_random_private_key, PrivateKey};
 use std::collections::HashMap;
 use time::UTime;
 
@@ -21,9 +22,7 @@ async fn test_ti() {
     .unwrap(); */
 
     let ledger_file = generate_ledger_file(&HashMap::new());
-    let staking_keys: Vec<crypto::signature::PrivateKey> = (0..1)
-        .map(|_| crypto::generate_random_private_key())
-        .collect();
+    let staking_keys: Vec<PrivateKey> = (0..1).map(|_| generate_random_private_key()).collect();
     let staking_file = tools::generate_staking_keys_file(&staking_keys);
     let roll_counts_file = tools::generate_default_roll_counts_file(staking_keys.clone());
     let mut cfg = tools::default_consensus_config(
@@ -40,10 +39,9 @@ async fn test_ti() {
 
     tools::consensus_without_pool_test(
         cfg.clone(),
-        None,
         async move |mut protocol_controller, consensus_command_sender, consensus_event_receiver| {
             let genesis_hashes = consensus_command_sender
-                .get_block_graph_status()
+                .get_block_graph_status(None, None)
                 .await
                 .expect("could not get block graph status")
                 .genesis_blocks;
@@ -56,7 +54,7 @@ async fn test_ti() {
                 genesis_hashes.clone(),
                 true,
                 false,
-                staking_keys[0].clone(),
+                staking_keys[0],
             )
             .await;
 
@@ -68,13 +66,13 @@ async fn test_ti() {
                 genesis_hashes.clone(),
                 true,
                 false,
-                staking_keys[0].clone(),
+                staking_keys[0],
             )
             .await;
 
             // one click with 2 block compatible
             let block_graph = consensus_command_sender
-                .get_block_graph_status()
+                .get_block_graph_status(None, None)
                 .await
                 .unwrap();
             let block1_clic = tools::get_cliques(&block_graph, valid_hasht0s1);
@@ -86,10 +84,10 @@ async fn test_ti() {
             // Create other clique bock T0S2
             let (fork_block_hash, block, _) = tools::create_block_with_merkle_root(
                 &cfg,
-                Hash::hash("Other hash!".as_bytes()),
+                Hash::from("Other hash!".as_bytes()),
                 Slot::new(2, 0),
                 genesis_hashes.clone(),
-                staking_keys[0].clone(),
+                staking_keys[0],
             );
 
             protocol_controller.receive_block(block).await;
@@ -97,7 +95,7 @@ async fn test_ti() {
             // two clique with valid_hasht0s1 and valid_hasht1s1 in one and fork_block_hash, valid_hasht1s1 in the other
             // test the first clique hasn't changed.
             let block_graph = consensus_command_sender
-                .get_block_graph_status()
+                .get_block_graph_status(None, None)
                 .await
                 .unwrap();
             let block1_clic = tools::get_cliques(&block_graph, valid_hasht0s1);
@@ -121,12 +119,12 @@ async fn test_ti() {
                     vec![parentt0sn_hash, valid_hasht1s1],
                     true,
                     false,
-                    staking_keys[0].clone(),
+                    staking_keys[0],
                 )
                 .await;
                 // validate the added block isn't in the forked block click.
                 let block_graph = consensus_command_sender
-                    .get_block_graph_status()
+                    .get_block_graph_status(None, None)
                     .await
                     .unwrap();
                 let block_clic = tools::get_cliques(&block_graph, block_hash);
@@ -141,7 +139,7 @@ async fn test_ti() {
                 &cfg,
                 Slot::new(2, 1),
                 vec![fork_block_hash, valid_hasht1s1],
-                staking_keys[0].clone(),
+                staking_keys[0],
             );
             protocol_controller.receive_block(block).await;
             assert!(
@@ -154,7 +152,7 @@ async fn test_ti() {
             );
             // verify that the clique has been pruned.
             let block_graph = consensus_command_sender
-                .get_block_graph_status()
+                .get_block_graph_status(None, None)
                 .await
                 .unwrap();
             let fork_clic = tools::get_cliques(&block_graph, fork_block_hash);
@@ -180,9 +178,7 @@ async fn test_gpi() {
     .unwrap();*/
 
     let ledger_file = generate_ledger_file(&HashMap::new());
-    let staking_keys: Vec<crypto::signature::PrivateKey> = (0..1)
-        .map(|_| crypto::generate_random_private_key())
-        .collect();
+    let staking_keys: Vec<PrivateKey> = (0..1).map(|_| generate_random_private_key()).collect();
     let staking_file = tools::generate_staking_keys_file(&staking_keys);
     let roll_counts_file = tools::generate_default_roll_counts_file(staking_keys.clone());
     let mut cfg = tools::default_consensus_config(
@@ -200,10 +196,9 @@ async fn test_gpi() {
 
     tools::consensus_without_pool_test(
         cfg.clone(),
-        None,
         async move |mut protocol_controller, consensus_command_sender, consensus_event_receiver| {
             let genesis_hashes = consensus_command_sender
-                .get_block_graph_status()
+                .get_block_graph_status(None, None)
                 .await
                 .expect("could not get block graph status")
                 .genesis_blocks;
@@ -217,7 +212,7 @@ async fn test_gpi() {
                 genesis_hashes.clone(),
                 true,
                 false,
-                staking_keys[0].clone(),
+                staking_keys[0],
             )
             .await;
 
@@ -229,13 +224,13 @@ async fn test_gpi() {
                 genesis_hashes.clone(),
                 true,
                 false,
-                staking_keys[0].clone(),
+                staking_keys[0],
             )
             .await;
 
             // one click with 2 block compatible
             let block_graph = consensus_command_sender
-                .get_block_graph_status()
+                .get_block_graph_status(None, None)
                 .await
                 .unwrap();
             let block1_clic = tools::get_cliques(&block_graph, valid_hasht0s1);
@@ -253,7 +248,7 @@ async fn test_gpi() {
                 vec![valid_hasht0s1, genesis_hashes[1]],
                 true,
                 false,
-                staking_keys[0].clone(),
+                staking_keys[0],
             )
             .await;
             // * create 1 block in t1s2 with parents of slots (t0s0, t1s1)
@@ -264,13 +259,13 @@ async fn test_gpi() {
                 vec![genesis_hashes[0], valid_hasht1s1],
                 true,
                 false,
-                staking_keys[0].clone(),
+                staking_keys[0],
             )
             .await;
 
             // * after processing the block in t1s2, the block of t0s2 is incompatible with block of t1s2 (link in gi)
             let block_graph = consensus_command_sender
-                .get_block_graph_status()
+                .get_block_graph_status(None, None)
                 .await
                 .unwrap();
             let blockt1s2_clic = tools::get_cliques(&block_graph, valid_hasht1s2);
@@ -300,7 +295,7 @@ async fn test_gpi() {
                     vec![parentt0sn_hash, valid_hasht1s1],
                     true,
                     false,
-                    staking_keys[0].clone(),
+                    staking_keys[0],
                 )
                 .await;
                 parentt0sn_hash = block_hash;
@@ -313,7 +308,7 @@ async fn test_gpi() {
                 vec![valid_hasht0s1, valid_hasht1s2],
                 false,
                 false,
-                staking_keys[0].clone(),
+                staking_keys[0],
             )
             .await;
 
@@ -321,7 +316,7 @@ async fn test_gpi() {
             //   the block of minimum hash becomes final, the one of maximum hash becomes stale
             // verify that the clique has been pruned.
             let block_graph = consensus_command_sender
-                .get_block_graph_status()
+                .get_block_graph_status(None, None)
                 .await
                 .unwrap();
             let fork_clic = tools::get_cliques(&block_graph, valid_hasht1s2);
@@ -350,9 +345,7 @@ async fn test_old_stale() {
     //     .unwrap();
 
     let ledger_file = generate_ledger_file(&HashMap::new());
-    let staking_keys: Vec<crypto::signature::PrivateKey> = (0..1)
-        .map(|_| crypto::generate_random_private_key())
-        .collect();
+    let staking_keys: Vec<PrivateKey> = (0..1).map(|_| generate_random_private_key()).collect();
     let staking_file = tools::generate_staking_keys_file(&staking_keys);
     let roll_counts_file = tools::generate_default_roll_counts_file(staking_keys.clone());
     let mut cfg = tools::default_consensus_config(
@@ -370,10 +363,9 @@ async fn test_old_stale() {
 
     tools::consensus_without_pool_test(
         cfg.clone(),
-        None,
         async move |mut protocol_controller, consensus_command_sender, consensus_event_receiver| {
             let genesis_hashes = consensus_command_sender
-                .get_block_graph_status()
+                .get_block_graph_status(None, None)
                 .await
                 .expect("could not get block graph status")
                 .genesis_blocks;
@@ -387,7 +379,7 @@ async fn test_old_stale() {
                 genesis_hashes.clone(),
                 true,
                 false,
-                staking_keys[0].clone(),
+                staking_keys[0],
             )
             .await;
 
@@ -399,7 +391,7 @@ async fn test_old_stale() {
                 genesis_hashes.clone(),
                 true,
                 false,
-                staking_keys[0].clone(),
+                staking_keys[0],
             )
             .await;
 
@@ -412,7 +404,7 @@ async fn test_old_stale() {
                     vec![valid_hasht0, valid_hasht1],
                     true,
                     false,
-                    staking_keys[0].clone(),
+                    staking_keys[0],
                 )
                 .await;
 
@@ -424,7 +416,7 @@ async fn test_old_stale() {
                     vec![valid_hasht0, valid_hasht1],
                     true,
                     false,
-                    staking_keys[0].clone(),
+                    staking_keys[0],
                 )
                 .await;
             }
@@ -437,7 +429,7 @@ async fn test_old_stale() {
                 genesis_hashes.clone(),
                 false,
                 false,
-                staking_keys[0].clone(),
+                staking_keys[0],
             )
             .await;
             (

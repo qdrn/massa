@@ -1,9 +1,10 @@
 // Copyright (c) 2021 MASSA LABS <info@massa.net>
 
 use crate::tests::tools::{self, generate_ledger_file};
-use crypto::hash::Hash;
+use massa_hash::hash::Hash;
 use models::Slot;
 use serial_test::serial;
+use signature::{generate_random_private_key, PrivateKey};
 use std::collections::HashMap;
 use time::UTime;
 
@@ -18,9 +19,7 @@ async fn test_queueing() {
     //     .unwrap();
 
     let ledger_file = generate_ledger_file(&HashMap::new());
-    let staking_keys: Vec<crypto::signature::PrivateKey> = (0..1)
-        .map(|_| crypto::generate_random_private_key())
-        .collect();
+    let staking_keys: Vec<PrivateKey> = (0..1).map(|_| generate_random_private_key()).collect();
     let staking_file = tools::generate_staking_keys_file(&staking_keys);
     let roll_counts_file = tools::generate_default_roll_counts_file(staking_keys.clone());
     let mut cfg = tools::default_consensus_config(
@@ -38,10 +37,9 @@ async fn test_queueing() {
 
     tools::consensus_without_pool_test(
         cfg.clone(),
-        None,
         async move |mut protocol_controller, consensus_command_sender, consensus_event_receiver| {
             let genesis_hashes = consensus_command_sender
-                .get_block_graph_status()
+                .get_block_graph_status(None, None)
                 .await
                 .expect("could not get block graph status")
                 .genesis_blocks;
@@ -55,7 +53,7 @@ async fn test_queueing() {
                 genesis_hashes.clone(),
                 true,
                 false,
-                staking_keys[0].clone(),
+                staking_keys[0],
             )
             .await;
 
@@ -67,7 +65,7 @@ async fn test_queueing() {
                 genesis_hashes.clone(),
                 true,
                 false,
-                staking_keys[0].clone(),
+                staking_keys[0],
             )
             .await;
 
@@ -80,7 +78,7 @@ async fn test_queueing() {
                     vec![valid_hasht0, valid_hasht1],
                     true,
                     false,
-                    staking_keys[0].clone(),
+                    staking_keys[0],
                 )
                 .await;
 
@@ -92,7 +90,7 @@ async fn test_queueing() {
                     vec![valid_hasht0, valid_hasht1],
                     true,
                     false,
-                    staking_keys[0].clone(),
+                    staking_keys[0],
                 )
                 .await;
             }
@@ -101,7 +99,7 @@ async fn test_queueing() {
                 &cfg,
                 Slot::new(32, 0),
                 vec![valid_hasht0, valid_hasht1],
-                staking_keys[0].clone(),
+                staking_keys[0],
             );
 
             // create 1 block in thread 0 slot 33 with missed block as parent
@@ -112,7 +110,7 @@ async fn test_queueing() {
                 vec![missed_hash, valid_hasht1],
                 false,
                 false,
-                staking_keys[0].clone(),
+                staking_keys[0],
             )
             .await;
 
@@ -125,7 +123,7 @@ async fn test_queueing() {
                     vec![valid_hasht0, valid_hasht1],
                     false,
                     false,
-                    staking_keys[0].clone(),
+                    staking_keys[0],
                 )
                 .await;
 
@@ -137,7 +135,7 @@ async fn test_queueing() {
                     vec![valid_hasht0, valid_hasht1],
                     false,
                     false,
-                    staking_keys[0].clone(),
+                    staking_keys[0],
                 )
                 .await;
             }
@@ -162,9 +160,7 @@ async fn test_doubles() {
     //     .unwrap();
 
     let ledger_file = generate_ledger_file(&HashMap::new());
-    let staking_keys: Vec<crypto::signature::PrivateKey> = (0..1)
-        .map(|_| crypto::generate_random_private_key())
-        .collect();
+    let staking_keys: Vec<PrivateKey> = (0..1).map(|_| generate_random_private_key()).collect();
     let staking_file = tools::generate_staking_keys_file(&staking_keys);
     let roll_counts_file = tools::generate_default_roll_counts_file(staking_keys.clone());
     let mut cfg = tools::default_consensus_config(
@@ -182,10 +178,9 @@ async fn test_doubles() {
 
     tools::consensus_without_pool_test(
         cfg.clone(),
-        None,
         async move |mut protocol_controller, consensus_command_sender, consensus_event_receiver| {
             let genesis_hashes = consensus_command_sender
-                .get_block_graph_status()
+                .get_block_graph_status(None, None)
                 .await
                 .expect("could not get block graph status")
                 .genesis_blocks;
@@ -199,7 +194,7 @@ async fn test_doubles() {
                 genesis_hashes.clone(),
                 true,
                 false,
-                staking_keys[0].clone(),
+                staking_keys[0],
             )
             .await;
 
@@ -211,7 +206,7 @@ async fn test_doubles() {
                 genesis_hashes.clone(),
                 true,
                 false,
-                staking_keys[0].clone(),
+                staking_keys[0],
             )
             .await;
 
@@ -224,7 +219,7 @@ async fn test_doubles() {
                     vec![valid_hasht0, valid_hasht1],
                     true,
                     false,
-                    staking_keys[0].clone(),
+                    staking_keys[0],
                 )
                 .await;
 
@@ -236,7 +231,7 @@ async fn test_doubles() {
                     vec![valid_hasht0, valid_hasht1],
                     true,
                     false,
-                    staking_keys[0].clone(),
+                    staking_keys[0],
                 )
                 .await;
             }
@@ -249,7 +244,7 @@ async fn test_doubles() {
                 vec![valid_hasht0, valid_hasht1],
                 true,
                 false,
-                staking_keys[0].clone(),
+                staking_keys[0],
             )
             .await;
 
@@ -281,9 +276,7 @@ async fn test_double_staking() {
     //     .unwrap();
 
     let ledger_file = generate_ledger_file(&HashMap::new());
-    let staking_keys: Vec<crypto::signature::PrivateKey> = (0..1)
-        .map(|_| crypto::generate_random_private_key())
-        .collect();
+    let staking_keys: Vec<PrivateKey> = (0..1).map(|_| generate_random_private_key()).collect();
     let staking_file = tools::generate_staking_keys_file(&staking_keys);
     let roll_counts_file = tools::generate_default_roll_counts_file(staking_keys.clone());
     let mut cfg = tools::default_consensus_config(
@@ -301,10 +294,9 @@ async fn test_double_staking() {
 
     tools::consensus_without_pool_test(
         cfg.clone(),
-        None,
         async move |mut protocol_controller, consensus_command_sender, consensus_event_receiver| {
             let genesis_hashes = consensus_command_sender
-                .get_block_graph_status()
+                .get_block_graph_status(None, None)
                 .await
                 .expect("could not get block graph status")
                 .genesis_blocks;
@@ -318,7 +310,7 @@ async fn test_double_staking() {
                 genesis_hashes.clone(),
                 true,
                 false,
-                staking_keys[0].clone(),
+                staking_keys[0],
             )
             .await;
 
@@ -330,7 +322,7 @@ async fn test_double_staking() {
                 genesis_hashes.clone(),
                 true,
                 false,
-                staking_keys[0].clone(),
+                staking_keys[0],
             )
             .await;
 
@@ -343,7 +335,7 @@ async fn test_double_staking() {
                     vec![valid_hasht0, valid_hasht1],
                     true,
                     false,
-                    staking_keys[0].clone(),
+                    staking_keys[0],
                 )
                 .await;
 
@@ -355,35 +347,35 @@ async fn test_double_staking() {
                     vec![valid_hasht0, valid_hasht1],
                     true,
                     false,
-                    staking_keys[0].clone(),
+                    staking_keys[0],
                 )
                 .await;
             }
 
             // same creator same slot, different block
-            let operation_merkle_root = Hash::hash("42".as_bytes());
+            let operation_merkle_root = Hash::from("42".as_bytes());
             let (hash_1, block_1, _key) = tools::create_block_with_merkle_root(
                 &cfg,
                 operation_merkle_root,
                 Slot::new(41, 0),
                 vec![valid_hasht0, valid_hasht1],
-                staking_keys[0].clone(),
+                staking_keys[0],
             );
             tools::propagate_block(&mut protocol_controller, block_1, true, 150).await;
 
             let operation_merkle_root =
-                Hash::hash("so long and thanks for all the fish".as_bytes());
+                Hash::from("so long and thanks for all the fish".as_bytes());
             let (hash_2, block_2, _key) = tools::create_block_with_merkle_root(
                 &cfg,
                 operation_merkle_root,
                 Slot::new(41, 0),
                 vec![valid_hasht0, valid_hasht1],
-                staking_keys[0].clone(),
+                staking_keys[0],
             );
             tools::propagate_block(&mut protocol_controller, block_2, true, 150).await;
 
             let graph = consensus_command_sender
-                .get_block_graph_status()
+                .get_block_graph_status(None, None)
                 .await
                 .unwrap();
             let cliques_1 = tools::get_cliques(&graph, hash_1);
@@ -410,9 +402,7 @@ async fn test_test_parents() {
     //     .unwrap();
 
     let ledger_file = generate_ledger_file(&HashMap::new());
-    let staking_keys: Vec<crypto::signature::PrivateKey> = (0..1)
-        .map(|_| crypto::generate_random_private_key())
-        .collect();
+    let staking_keys: Vec<PrivateKey> = (0..1).map(|_| generate_random_private_key()).collect();
     let staking_file = tools::generate_staking_keys_file(&staking_keys);
 
     let roll_counts_file = tools::generate_default_roll_counts_file(staking_keys.clone());
@@ -431,10 +421,9 @@ async fn test_test_parents() {
 
     tools::consensus_without_pool_test(
         cfg.clone(),
-        None,
         async move |mut protocol_controller, consensus_command_sender, consensus_event_receiver| {
             let genesis_hashes = consensus_command_sender
-                .get_block_graph_status()
+                .get_block_graph_status(None, None)
                 .await
                 .expect("could not get block graph status")
                 .genesis_blocks;
@@ -448,7 +437,7 @@ async fn test_test_parents() {
                 genesis_hashes.clone(),
                 true,
                 false,
-                staking_keys[0].clone(),
+                staking_keys[0],
             )
             .await;
 
@@ -460,7 +449,7 @@ async fn test_test_parents() {
                 genesis_hashes.clone(),
                 true,
                 false,
-                staking_keys[0].clone(),
+                staking_keys[0],
             )
             .await;
 
@@ -472,7 +461,7 @@ async fn test_test_parents() {
                 vec![valid_hasht0s1, valid_hasht1s1],
                 true,
                 false,
-                staking_keys[0].clone(),
+                staking_keys[0],
             )
             .await;
 
@@ -484,7 +473,7 @@ async fn test_test_parents() {
                 vec![valid_hasht0s1, valid_hasht1s1],
                 true,
                 false,
-                staking_keys[0].clone(),
+                staking_keys[0],
             )
             .await;
 
@@ -497,7 +486,7 @@ async fn test_test_parents() {
                 vec![valid_hasht0s2, genesis_hashes[1usize]],
                 false,
                 false,
-                staking_keys[0].clone(),
+                staking_keys[0],
             )
             .await;
 
@@ -509,7 +498,7 @@ async fn test_test_parents() {
                 vec![genesis_hashes[0usize], genesis_hashes[0usize]],
                 false,
                 false,
-                staking_keys[0].clone(),
+                staking_keys[0],
             )
             .await;
             (

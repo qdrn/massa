@@ -10,11 +10,12 @@ use crate::{
     NetworkCommandSender, NetworkConfig, NetworkEvent, NetworkEventReceiver, NetworkManager,
     PeerInfo,
 };
-use crypto::{derive_public_key, generate_random_private_key, hash::Hash};
+use massa_hash::hash::Hash;
 use models::node::NodeId;
 use models::{
     Address, Amount, BlockId, Operation, OperationContent, OperationType, SerializeCompact, Version,
 };
+use signature::{derive_public_key, generate_random_private_key, sign};
 use std::str::FromStr;
 use std::{
     future::Future,
@@ -31,7 +32,7 @@ use tracing::trace;
 pub const BASE_NETWORK_CONTROLLER_IP: IpAddr = IpAddr::V4(Ipv4Addr::new(169, 202, 0, 10));
 
 pub fn get_dummy_block_id(s: &str) -> BlockId {
-    BlockId(Hash::hash(s.as_bytes()))
+    BlockId(Hash::from(s.as_bytes()))
 }
 
 /// generate a named temporary JSON peers file
@@ -73,7 +74,7 @@ pub fn create_network_config(
         max_bootstrap_message_size: 100000000,
         max_bootstrap_pos_entries: 1000,
         max_bootstrap_pos_cycles: 5,
-        max_block_endorsments: 8,
+        max_block_endorsements: 8,
     });
 
     NetworkConfig {
@@ -204,29 +205,29 @@ pub async fn rejected_connection_to_controller(
     .await;
 
     // wait for NetworkEvent::NewConnection or NetworkEvent::ConnectionClosed events to NOT happen
-    if let Some(_) =
-        wait_network_event(
-            network_event_receiver,
-            event_timeout_ms.into(),
-            |msg| match msg {
-                NetworkEvent::NewConnection(conn_node_id) => {
-                    if conn_node_id == mock_node_id {
-                        Some(())
-                    } else {
-                        None
-                    }
+    if wait_network_event(
+        network_event_receiver,
+        event_timeout_ms.into(),
+        |msg| match msg {
+            NetworkEvent::NewConnection(conn_node_id) => {
+                if conn_node_id == mock_node_id {
+                    Some(())
+                } else {
+                    None
                 }
-                NetworkEvent::ConnectionClosed(conn_node_id) => {
-                    if conn_node_id == mock_node_id {
-                        Some(())
-                    } else {
-                        None
-                    }
+            }
+            NetworkEvent::ConnectionClosed(conn_node_id) => {
+                if conn_node_id == mock_node_id {
+                    Some(())
+                } else {
+                    None
                 }
-                _ => None,
-            },
-        )
-        .await
+            }
+            _ => None,
+        },
+    )
+    .await
+    .is_some()
     {
         panic!("unexpected node connection event detected");
     }
@@ -358,11 +359,11 @@ pub async fn incoming_message_drain_stop(
 }
 
 pub fn get_transaction(expire_period: u64, fee: u64) -> (Operation, u8) {
-    let sender_priv = crypto::generate_random_private_key();
-    let sender_pub = crypto::derive_public_key(&sender_priv);
+    let sender_priv = generate_random_private_key();
+    let sender_pub = derive_public_key(&sender_priv);
 
-    let recv_priv = crypto::generate_random_private_key();
-    let recv_pub = crypto::derive_public_key(&recv_priv);
+    let recv_priv = generate_random_private_key();
+    let recv_pub = derive_public_key(&recv_priv);
 
     let op = OperationType::Transaction {
         recipient_address: Address::from_public_key(&recv_pub).unwrap(),
@@ -374,8 +375,8 @@ pub fn get_transaction(expire_period: u64, fee: u64) -> (Operation, u8) {
         sender_public_key: sender_pub,
         expire_period,
     };
-    let hash = Hash::hash(&content.to_bytes_compact().unwrap());
-    let signature = crypto::sign(&hash, &sender_priv).unwrap();
+    let hash = Hash::from(&content.to_bytes_compact().unwrap());
+    let signature = sign(&hash, &sender_priv).unwrap();
 
     (
         Operation { content, signature },

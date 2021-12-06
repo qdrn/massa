@@ -1,15 +1,16 @@
 // Copyright (c) 2021 MASSA LABS <info@massa.net>
 
-use super::{config::PoolConfig, error::PoolError};
+use super::{error::PoolError, settings::PoolSettings};
 use crate::endorsement_pool::EndorsementPool;
 use crate::operation_pool::OperationPool;
 use models::stats::PoolStats;
 use models::{
-    Address, BlockId, Endorsement, EndorsementHashMap, EndorsementId, Operation, OperationHashMap,
-    OperationHashSet, OperationId, OperationSearchResult, Slot,
+    Address, BlockId, Endorsement, EndorsementHashMap, EndorsementHashSet, EndorsementId,
+    Operation, OperationHashMap, OperationHashSet, OperationId, OperationSearchResult, Slot,
 };
 use protocol_exports::{ProtocolCommandSender, ProtocolPoolEvent, ProtocolPoolEventReceiver};
 use tokio::sync::{mpsc, oneshot};
+use tracing::warn;
 
 /// Commands that can be processed by pool.
 #[derive(Debug)]
@@ -41,6 +42,14 @@ pub enum PoolCommand {
     },
     AddEndorsements(EndorsementHashMap<Endorsement>),
     GetStats(oneshot::Sender<PoolStats>),
+    GetEndorsementsByAddress {
+        address: Address,
+        response_tx: oneshot::Sender<EndorsementHashMap<Endorsement>>,
+    },
+    GetEndorsementsById {
+        endorsements: EndorsementHashSet,
+        response_tx: oneshot::Sender<EndorsementHashMap<Endorsement>>,
+    },
 }
 
 /// Events that are emitted by pool.
@@ -68,7 +77,7 @@ impl PoolWorker {
     /// Initiates the random selector.
     ///
     /// # Arguments
-    /// * cfg: pool configuration.
+    /// * pool_settings: pool configuration.
     /// * thread_count: number of threads
     /// * operation_validity_periods : operation validity period
     /// * protocol_command_sender: associated protocol controller
@@ -76,7 +85,7 @@ impl PoolWorker {
     /// * controller_command_rx: Channel receiving pool commands.
     /// * controller_manager_rx: Channel receiving pool management commands.
     pub fn new(
-        cfg: PoolConfig,
+        pool_settings: &'static PoolSettings,
         thread_count: u8,
         operation_validity_periods: u64,
         protocol_command_sender: ProtocolCommandSender,
@@ -91,11 +100,11 @@ impl PoolWorker {
             controller_command_rx,
             controller_manager_rx,
             operation_pool: OperationPool::new(
-                cfg.clone(),
+                pool_settings,
                 thread_count,
                 operation_validity_periods,
             ),
-            endorsement_pool: EndorsementPool::new(cfg, thread_count),
+            endorsement_pool: EndorsementPool::new(pool_settings, thread_count),
         })
     }
 
@@ -172,41 +181,61 @@ impl PoolWorker {
                 batch_size,
                 max_size,
                 response_tx,
-            } => response_tx
-                .send(self.operation_pool.get_operation_batch(
-                    target_slot,
-                    exclude,
-                    batch_size,
-                    max_size,
-                )?)
-                .map_err(|e| PoolError::ChannelError(format!("could not send {:?}", e)))?,
+            } => {
+                if response_tx
+                    .send(self.operation_pool.get_operation_batch(
+                        target_slot,
+                        exclude,
+                        batch_size,
+                        max_size,
+                    )?)
+                    .is_err()
+                {
+                    warn!("pool: could not send get_operation_batch response");
+                }
+            }
             PoolCommand::GetOperations {
                 operation_ids,
                 response_tx,
-            } => response_tx
-                .send(self.operation_pool.get_operations(&operation_ids))
-                .map_err(|e| PoolError::ChannelError(format!("could not send {:?}", e)))?,
+            } => {
+                if response_tx
+                    .send(self.operation_pool.get_operations(&operation_ids))
+                    .is_err()
+                {
+                    warn!("pool: could not send get_operations response");
+                }
+            }
             PoolCommand::GetRecentOperations {
                 address,
                 response_tx,
-            } => response_tx
-                .send(
-                    self.operation_pool
-                        .get_operations_involving_address(&address)?,
-                )
-                .map_err(|e| PoolError::ChannelError(format!("could not send {:?}", e)))?,
+            } => {
+                if response_tx
+                    .send(
+                        self.operation_pool
+                            .get_operations_involving_address(&address)?,
+                    )
+                    .is_err()
+                {
+                    warn!("pool: could not send get_operations_involving_address response");
+                }
+            }
             PoolCommand::FinalOperations(ops) => self.operation_pool.new_final_operations(ops)?,
             PoolCommand::GetEndorsements {
                 target_slot,
                 parent,
                 creators,
                 response_tx,
-            } => response_tx
-                .send(
-                    self.endorsement_pool
-                        .get_endorsements(target_slot, parent, creators)?,
-                )
-                .map_err(|e| PoolError::ChannelError(format!("could not send {:?}", e)))?,
+            } => {
+                if response_tx
+                    .send(
+                        self.endorsement_pool
+                            .get_endorsements(target_slot, parent, creators)?,
+                    )
+                    .is_err()
+                {
+                    warn!("pool: could not send get_endorsements response");
+                }
+            }
             PoolCommand::AddEndorsements(mut endorsements) => {
                 let newly_added = self
                     .endorsement_pool
@@ -218,12 +247,39 @@ impl PoolWorker {
                         .await?;
                 }
             }
-            PoolCommand::GetStats(response_tx) => response_tx
-                .send(PoolStats {
-                    operation_count: self.operation_pool.len() as u64,
-                    endorsement_count: self.endorsement_pool.len() as u64,
-                })
-                .map_err(|e| PoolError::ChannelError(format!("could not send {:?}", e)))?,
+            PoolCommand::GetStats(response_tx) => {
+                if response_tx
+                    .send(PoolStats {
+                        operation_count: self.operation_pool.len() as u64,
+                        endorsement_count: self.endorsement_pool.len() as u64,
+                    })
+                    .is_err()
+                {
+                    warn!("pool: could not send PoolStats response");
+                }
+            }
+            PoolCommand::GetEndorsementsByAddress {
+                response_tx,
+                address,
+            } => {
+                if response_tx
+                    .send(self.endorsement_pool.get_endorsement_by_address(address)?)
+                    .is_err()
+                {
+                    warn!("pool: could not send PoolStats response");
+                }
+            }
+            PoolCommand::GetEndorsementsById {
+                response_tx,
+                endorsements,
+            } => {
+                if response_tx
+                    .send(self.endorsement_pool.get_endorsement_by_id(endorsements))
+                    .is_err()
+                {
+                    warn!("pool: could not send PoolStats response");
+                }
+            }
         }
         Ok(())
     }

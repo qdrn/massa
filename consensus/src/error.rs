@@ -42,8 +42,8 @@ pub enum ConsensusError {
     HashConversionError,
     /// config error: {0}
     ConfigError(String),
-    /// crypto error {0}
-    CryptoError(#[from] crypto::CryptoError),
+    /// massa_hash error {0}
+    MassaHashError(#[from] massa_hash::MassaHashError),
     /// Protocol error {0}
     ProtocolError(#[from] ProtocolError),
     /// failed retrieving consensus controller event
@@ -64,8 +64,6 @@ pub enum ConsensusError {
     SendChannelError(String),
     /// Receive  channel error : {0}
     ReceiveChannelError(String),
-    /// Storage error : {0}
-    StorageError(#[from] storage::StorageError),
     /// pool error : {0}
     PoolError(#[from] pool::PoolError),
     /// sled error: {0}
