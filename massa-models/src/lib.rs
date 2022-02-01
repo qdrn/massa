@@ -47,6 +47,7 @@ mod serialization;
 mod settings;
 pub mod slot;
 pub mod stats;
+pub mod storage;
 pub mod timeslots;
 mod version;
 

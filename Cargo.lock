@@ -1647,6 +1647,7 @@ dependencies = [
  "massa_time",
  "num-traits 0.2.14",
  "num_enum",
+ "parking_lot",
  "pretty_assertions",
  "rand 0.8.4",
  "reqwest",
