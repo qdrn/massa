@@ -10,6 +10,7 @@ use tracing::{debug, error, info};
 use crate::consensus_worker::ConsensusWorker;
 use massa_consensus_exports::settings::ConsensusConfig;
 use massa_graph::{BlockGraph, BootstrapableGraph};
+use massa_models::storage::Storage;
 use massa_models::{prehash::Map, Address};
 use massa_proof_of_stake_exports::{ExportProofOfStake, ProofOfStake};
 use massa_signature::{derive_public_key, PrivateKey, PublicKey};
@@ -43,6 +44,7 @@ pub async fn start_consensus_controller(
     channels: ConsensusChannels,
     boot_pos: Option<ExportProofOfStake>,
     boot_graph: Option<BootstrapableGraph>,
+    storage: Storage,
     clock_compensation: i64,
 ) -> Result<(
     ConsensusCommandSender,
@@ -75,7 +77,7 @@ pub async fn start_consensus_controller(
     let staking_keys = load_initial_staking_keys(&cfg.staking_keys_path).await?;
 
     // start worker
-    let block_db = BlockGraph::new((&cfg).into(), boot_graph).await?;
+    let block_db = BlockGraph::new((&cfg).into(), boot_graph, storage).await?;
     let mut pos =
         ProofOfStake::new((&cfg).into(), block_db.get_genesis_block_ids(), boot_pos).await?;
     pos.set_watched_addresses(staking_keys.keys().copied().collect());

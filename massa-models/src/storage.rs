@@ -3,6 +3,7 @@ use crate::{Block, BlockId, Endorsement, EndorsementId, Operation, OperationId};
 use parking_lot::RwLock;
 use std::sync::Arc;
 
+#[derive(Clone, Default)]
 pub struct Storage {
     blocks: Arc<RwLock<Map<BlockId, Arc<RwLock<Block>>>>>,
     operations: Arc<RwLock<Map<OperationId, Arc<RwLock<Operation>>>>>,

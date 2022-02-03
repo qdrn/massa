@@ -15,6 +15,7 @@ use massa_consensus_worker::start_consensus_controller;
 use massa_execution::{ExecutionConfigs, ExecutionManager};
 
 use massa_logging::massa_trace;
+use massa_models::storage::Storage;
 use massa_models::{init_serialization_context, SerializationContext};
 use massa_network::{start_network_controller, Establisher, NetworkCommandSender, NetworkManager};
 use massa_pool::{start_pool_controller, PoolCommandSender, PoolManager};
@@ -53,6 +54,9 @@ async fn launch() -> (
             panic!("This episode has come to an end, please get the latest testnet node version to continue");
         }
     }
+
+    // Storage shared by multiple components.
+    let shared_storage: Storage = Default::default();
 
     // Init the global serialization context
     init_serialization_context(SerializationContext {
@@ -160,6 +164,7 @@ async fn launch() -> (
             },
             bootstrap_state.pos,
             bootstrap_state.graph,
+            shared_storage.clone(),
             bootstrap_state.compensation_millis,
         )
         .await
