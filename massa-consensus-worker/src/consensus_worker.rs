@@ -498,7 +498,7 @@ impl ConsensusWorker {
                         ancestor_id
                     ))
                 })?;
-            if ancestor.block.header.content.slot.period < stop_period {
+            if ancestor.slot.period < stop_period {
                 break;
             }
             exclude_operations.extend(ancestor.operation_set.keys());
@@ -681,16 +681,7 @@ impl ConsensusWorker {
                     "consensus.consensus_worker.process_consensus_command.get_active_block",
                     {}
                 );
-                if response_tx
-                    .send(
-                        self.block_db
-                            .get_active_block(&block_id)
-                            .map(|v| v.block.clone()),
-                    )
-                    .is_err()
-                {
-                    warn!("consensus: could not send GetBlock answer");
-                }
+                // TODO: use shared storage.
                 Ok(())
             }
             // return full block and status with specified hash
@@ -1132,28 +1123,7 @@ impl ConsensusWorker {
                     "consensus.consensus_worker.process_protocol_event.get_blocks",
                     { "list": list }
                 );
-                let mut results = Map::default();
-                for block_hash in list {
-                    if let Some(a_block) = self.block_db.get_active_block(&block_hash) {
-                        massa_trace!("consensus.consensus_worker.process_protocol_event.get_block.consensus_found", { "hash": block_hash});
-                        results.insert(
-                            block_hash,
-                            Some((
-                                a_block.block.clone(),
-                                Some(a_block.operation_set.keys().copied().collect()),
-                                Some(a_block.endorsement_ids.keys().copied().collect()),
-                            )),
-                        );
-                    } else {
-                        // not found in consensus
-                        massa_trace!("consensus.consensus_worker.process_protocol_event.get_block.consensu_not_found", { "hash": block_hash});
-                        results.insert(block_hash, None);
-                    }
-                }
-                self.channels
-                    .protocol_command_sender
-                    .send_get_blocks_results(results)
-                    .await?;
+                // TODO: use shared storage.
             }
         }
         Ok(())
@@ -1201,26 +1171,7 @@ impl ConsensusWorker {
 
         // notify Execution
         {
-            let finalized_blocks = new_final_block_ids
-                .iter()
-                .filter_map(|b_id| {
-                    self.block_db
-                        .get_active_block(b_id)
-                        .map(|b| (*b_id, b.block.clone()))
-                })
-                .collect();
-            let blockclique = blockclique_set
-                .iter()
-                .filter_map(|b_id| {
-                    self.block_db
-                        .get_active_block(b_id)
-                        .map(|b| (*b_id, b.block.clone()))
-                })
-                .collect();
-            self.channels
-                .execution_command_sender
-                .update_blockclique(finalized_blocks, blockclique)
-                .await?;
+            // TODO: use shared storage.
         }
 
         // Process new final blocks
@@ -1232,9 +1183,10 @@ impl ConsensusWorker {
             if let Some(a_block) = self.block_db.get_active_block(&b_id) {
                 // List new final ops
                 new_final_ops.extend(
-                    a_block.operation_set.iter().map(|(id, (_, exp))| {
-                        (*id, (*exp, a_block.block.header.content.slot.thread))
-                    }),
+                    a_block
+                        .operation_set
+                        .iter()
+                        .map(|(id, (_, exp))| (*id, (*exp, a_block.slot.thread))),
                 );
                 // List final block
                 new_final_blocks.insert(b_id, a_block);
@@ -1242,7 +1194,7 @@ impl ConsensusWorker {
                 self.final_block_stats.push_back((
                     timestamp,
                     a_block.operation_set.len() as u64,
-                    Address::from_public_key(&a_block.block.header.content.creator),
+                    a_block.creator_address,
                 ));
             }
         }
@@ -1297,7 +1249,7 @@ impl ConsensusWorker {
             // iterate on all blockclique blocks
             for block_id in blockclique_set.into_iter() {
                 let block_slot = match self.block_db.get_active_block(&block_id) {
-                    Some(b) => b.block.header.content.slot,
+                    Some(b) => b.slot,
                     None => continue,
                 };
                 if self.endorsed_slots.contains(&block_slot) {
