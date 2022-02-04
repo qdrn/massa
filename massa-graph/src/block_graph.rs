@@ -1792,7 +1792,7 @@ impl BlockGraph {
             self.to_propagate.insert(
                 block_id,
                 (
-                    active.block.clone(),
+                    valid_block.clone(),
                     active.operation_set.keys().copied().collect(),
                     active.endorsement_ids.keys().copied().collect(),
                 ),
