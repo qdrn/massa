@@ -30,7 +30,7 @@ use massa_proof_of_stake_exports::{
 use massa_signature::{derive_public_key, PublicKey};
 use serde::{Deserialize, Serialize};
 use std::mem;
-use std::{collections::HashSet, convert::TryInto, usize};
+use std::{collections::HashSet, usize};
 use std::{
     collections::{hash_map, BTreeSet, VecDeque},
     convert::TryFrom,
@@ -468,8 +468,52 @@ impl BlockGraph {
                 block_statuses: boot_graph
                     .active_blocks
                     .into_iter()
-                    .map(|(b_id, block)| {
-                        Ok((b_id, BlockStatus::Active(Box::new(block.try_into()?))))
+                    .map(|(b_id, block_export)| {
+                        let operation_set = block_export
+                            .block
+                            .operations
+                            .iter()
+                            .enumerate()
+                            .map(|(idx, op)| match op.get_operation_id() {
+                                Ok(id) => Ok((id, (idx, op.content.expire_period))),
+                                Err(e) => Err(e),
+                            })
+                            .collect::<Result<_, _>>()?;
+
+                        let endorsement_ids = block_export
+                            .block
+                            .header
+                            .content
+                            .endorsements
+                            .iter()
+                            .map(|endo| Ok((endo.compute_endorsement_id()?, endo.content.index)))
+                            .collect::<Result<_>>()?;
+
+                        let addresses_to_operations =
+                            block_export.block.involved_addresses(&operation_set)?;
+                        let addresses_to_endorsements = block_export
+                            .block
+                            .addresses_to_endorsements(&endorsement_ids)?;
+                        let active_block = ActiveBlock {
+                            creator_address: Address::from_public_key(
+                                &block_export.block.header.content.creator,
+                            ),
+                            block: b_id,
+                            parents: block_export.parents,
+                            children: block_export.children,
+                            dependencies: block_export.dependencies,
+                            descendants: Default::default(), // will be computed once the full graph is available
+                            is_final: block_export.is_final,
+                            block_ledger_changes: block_export.block_ledger_changes,
+                            operation_set,
+                            endorsement_ids,
+                            addresses_to_operations,
+                            roll_updates: block_export.roll_updates,
+                            production_events: block_export.production_events,
+                            addresses_to_endorsements,
+                            slot: block_export.block.header.content.slot,
+                        };
+                        Ok((b_id, BlockStatus::Active(Box::new(active_block))))
                     })
                     .collect::<Result<_>>()?,
                 incoming_index: Default::default(),
