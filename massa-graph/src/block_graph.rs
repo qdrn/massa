@@ -135,24 +135,6 @@ pub enum ExportBlockStatus {
     Discarded(DiscardReason),
 }
 
-impl<'a> From<&'a BlockStatus> for ExportBlockStatus {
-    fn from(block: &BlockStatus) -> Self {
-        match block {
-            BlockStatus::Incoming(_) => ExportBlockStatus::Incoming,
-            BlockStatus::WaitingForSlot(_) => ExportBlockStatus::WaitingForSlot,
-            BlockStatus::WaitingForDependencies { .. } => ExportBlockStatus::WaitingForDependencies,
-            BlockStatus::Active(active_block) => {
-                if active_block.is_final {
-                    ExportBlockStatus::Final(active_block.block.clone())
-                } else {
-                    ExportBlockStatus::Active(active_block.block.clone())
-                }
-            }
-            BlockStatus::Discarded { reason, .. } => ExportBlockStatus::Discarded(reason.clone()),
-        }
-    }
-}
-
 /// The block version that can be exported.
 /// Note that the detailed list of operation is not exported
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1203,7 +1185,25 @@ impl BlockGraph {
     pub fn get_export_block_status(&self, block_id: &BlockId) -> Option<ExportBlockStatus> {
         self.block_statuses
             .get(block_id)
-            .map(|block_status| block_status.into())
+            .map(|block_status| match block_status {
+                BlockStatus::Incoming(_) => ExportBlockStatus::Incoming,
+                BlockStatus::WaitingForSlot(_) => ExportBlockStatus::WaitingForSlot,
+                BlockStatus::WaitingForDependencies { .. } => {
+                    ExportBlockStatus::WaitingForDependencies
+                }
+                BlockStatus::Active(active_block) => {
+                    let block = self.storage.retrieve_block(block_id).unwrap();
+                    let block = block.read();
+                    if active_block.is_final {
+                        ExportBlockStatus::Final(block.clone())
+                    } else {
+                        ExportBlockStatus::Active(block.clone())
+                    }
+                }
+                BlockStatus::Discarded { reason, .. } => {
+                    ExportBlockStatus::Discarded(reason.clone())
+                }
+            })
     }
 
     /// Retrieves operations from operation Ids
