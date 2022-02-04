@@ -31,21 +31,6 @@ pub struct ExportActiveBlock {
     pub production_events: Vec<(u64, Address, bool)>,
 }
 
-impl From<&ActiveBlock> for ExportActiveBlock {
-    fn from(a_block: &ActiveBlock) -> Self {
-        ExportActiveBlock {
-            block: a_block.block.clone(),
-            parents: a_block.parents.clone(),
-            children: a_block.children.clone(),
-            dependencies: a_block.dependencies.clone(),
-            is_final: a_block.is_final,
-            block_ledger_changes: a_block.block_ledger_changes.clone(),
-            roll_updates: a_block.roll_updates.clone(),
-            production_events: a_block.production_events.clone(),
-        }
-    }
-}
-
 impl TryFrom<ExportActiveBlock> for ActiveBlock {
     fn try_from(a_block: ExportActiveBlock) -> Result<ActiveBlock> {
         let operation_set = a_block
