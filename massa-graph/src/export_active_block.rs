@@ -58,7 +58,7 @@ impl TryFrom<ExportActiveBlock> for ActiveBlock {
             a_block.block.addresses_to_endorsements(&endorsement_ids)?;
         Ok(ActiveBlock {
             creator_address: Address::from_public_key(&a_block.block.header.content.creator),
-            block: a_block.block,
+            block: a_block.block.header.compute_block_id()?,
             parents: a_block.parents,
             children: a_block.children,
             dependencies: a_block.dependencies,
@@ -71,6 +71,7 @@ impl TryFrom<ExportActiveBlock> for ActiveBlock {
             roll_updates: a_block.roll_updates,
             production_events: a_block.production_events,
             addresses_to_endorsements,
+            slot: a_block.block.header.content.slot,
         })
     }
 
