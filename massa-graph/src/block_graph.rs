@@ -1392,12 +1392,13 @@ impl BlockGraph {
     pub fn incoming_block(
         &mut self,
         block_id: BlockId,
-        block: Block,
         operation_set: Map<OperationId, (usize, u64)>,
         endorsement_ids: Map<EndorsementId, u32>,
         pos: &mut ProofOfStake,
         current_slot: Option<Slot>,
     ) -> Result<()> {
+        let stored_block = self.storage.retrieve_block(&block_id).unwrap();
+        let block = stored_block.read().block.clone();
         // ignore genesis blocks
         if self.genesis_hashes.contains(&block_id) {
             return Ok(());

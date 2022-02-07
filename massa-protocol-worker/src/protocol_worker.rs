@@ -5,7 +5,8 @@ use massa_hash::hash::Hash;
 use massa_logging::massa_trace;
 use massa_models::node::NodeId;
 use massa_models::prehash::{BuildMap, Map, Set};
-use massa_models::{Address, Block, BlockHeader, BlockId, Operation, OperationId, OperationType};
+use massa_models::storage::Storage;
+use massa_models::{Address, BlockHeader, BlockId, Operation, OperationId, OperationType};
 use massa_models::{Endorsement, EndorsementId};
 use massa_network::{NetworkCommandSender, NetworkEvent, NetworkEventReceiver};
 use massa_protocol_exports::{
@@ -39,6 +40,7 @@ pub async fn start_protocol_controller(
     max_block_gas: u64,
     network_command_sender: NetworkCommandSender,
     network_event_receiver: NetworkEventReceiver,
+    storage: Storage,
 ) -> Result<
     (
         ProtocolCommandSender,
@@ -61,6 +63,7 @@ pub async fn start_protocol_controller(
             protocol_settings,
             operation_validity_periods,
             max_block_gas,
+            storage,
             ProtocolWorkerChannels {
                 network_command_sender,
                 network_event_receiver,
@@ -307,6 +310,8 @@ pub struct ProtocolWorker {
     checked_operations: Set<OperationId>,
     /// List of processed headers
     checked_headers: Map<BlockId, BlockInfo>,
+    /// Shared storage.
+    storage: Storage,
 }
 
 pub struct ProtocolWorkerChannels {
@@ -334,6 +339,7 @@ impl ProtocolWorker {
         protocol_settings: &'static ProtocolSettings,
         operation_validity_periods: u64,
         max_block_gas: u64,
+        storage: Storage,
         ProtocolWorkerChannels {
             network_command_sender,
             network_event_receiver,
@@ -358,6 +364,7 @@ impl ProtocolWorker {
             checked_endorsements: Default::default(),
             checked_operations: Default::default(),
             checked_headers: Default::default(),
+            storage,
         }
     }
 
@@ -1092,7 +1099,7 @@ impl ProtocolWorker {
     /// - Check root hash.
     async fn note_block_from_node(
         &mut self,
-        block: &Block,
+        block: &BlockId,
         source_node_id: &NodeId,
     ) -> Result<
         Option<(
@@ -1104,15 +1111,29 @@ impl ProtocolWorker {
     > {
         massa_trace!("protocol.protocol_worker.note_block_from_node", { "node": source_node_id, "block": block });
 
-        // check header
-        let (block_id, endorsement_ids, _is_header_new) = match self
-            .note_header_from_node(&block.header, source_node_id)
-            .await
-        {
-            Ok(Some(v)) => v,
-            Ok(None) => return Ok(None),
-            Err(err) => return Err(err),
+        let (header, operations, operation_merkle_root, slot) = {
+            let stored_block = self.storage.retrieve_block(&block).unwrap();
+            let stored_block = stored_block.read();
+            (
+                stored_block.block.header.clone(),
+                stored_block.block.operations.clone(),
+                stored_block
+                    .block
+                    .header
+                    .content
+                    .operation_merkle_root
+                    .clone(),
+                stored_block.block.header.content.slot,
+            )
         };
+
+        // check header
+        let (block_id, endorsement_ids, _is_header_new) =
+            match self.note_header_from_node(&header, source_node_id).await {
+                Ok(Some(v)) => v,
+                Ok(None) => return Ok(None),
+                Err(err) => return Err(err),
+            };
 
         let serialization_context =
             massa_models::with_serialization_context(|context| context.clone());
@@ -1120,7 +1141,7 @@ impl ProtocolWorker {
         // Perform general checks on the operations, note them into caches and send them to pool
         // but do not propagate as they are already propagating within a block
         let (seen_ops, received_operations_ids, has_duplicate_operations, total_gas) = self
-            .note_operations_from_node(block.operations.clone(), source_node_id, false)
+            .note_operations_from_node(operations.clone(), source_node_id, false)
             .await?;
         if total_gas > self.max_block_gas {
             // Gas usage over limit => block invalid
@@ -1135,24 +1156,22 @@ impl ProtocolWorker {
             // Block contains duplicate operations.
             return Ok(None);
         }
-        for op in block.operations.iter() {
+        for op in operations.iter() {
             // check validity period
             if !(op
                 .get_validity_range(self.operation_validity_periods)
-                .contains(&block.header.content.slot.period))
+                .contains(&slot.period))
             {
                 massa_trace!("protocol.protocol_worker.note_block_from_node.err_op_period",
-                    { "node": source_node_id,"block_id":block_id, "block": block, "op": op });
+                    { "node": source_node_id,"block_id":block_id, "op": op });
                 return Ok(None);
             }
 
             // check address and thread
             let addr = Address::from_public_key(&op.content.sender_public_key);
-            if addr.get_thread(serialization_context.parent_count)
-                != block.header.content.slot.thread
-            {
+            if addr.get_thread(serialization_context.parent_count) != slot.thread {
                 massa_trace!("protocol.protocol_worker.note_block_from_node.err_op_thread",
-                    { "node": source_node_id,"block_id":block_id, "block": block, "op": op});
+                    { "node": source_node_id,"block_id":block_id, "op": op});
                 return Ok(None);
             }
         }
@@ -1163,9 +1182,9 @@ impl ProtocolWorker {
                 .iter()
                 .map(|op_id| op_id.to_bytes().to_vec())
                 .concat();
-            if block.header.content.operation_merkle_root != Hash::compute_from(&concat_bytes) {
+            if operation_merkle_root != Hash::compute_from(&concat_bytes) {
                 massa_trace!("protocol.protocol_worker.note_block_from_node.err_op_root_hash",
-                    { "node": source_node_id,"block_id":block_id, "block": block });
+                    { "node": source_node_id,"block_id":block_id});
                 return Ok(None);
             }
         }
@@ -1352,6 +1371,8 @@ impl ProtocolWorker {
                 block,
             } => {
                 massa_trace!("protocol.protocol_worker.on_network_event.received_block", { "node": from_node_id, "block": block});
+
+                // TODO: remove clone of block.
                 if let Some((block_id, operation_set, endorsement_ids)) =
                     self.note_block_from_node(&block, &from_node_id).await?
                 {
@@ -1359,8 +1380,7 @@ impl ProtocolWorker {
                     set.insert(block_id);
                     self.stop_asking_blocks(set)?;
                     self.send_protocol_event(ProtocolEvent::ReceivedBlock {
-                        block_id,
-                        block,
+                        block: block_id,
                         operation_set,
                         endorsement_ids,
                     })

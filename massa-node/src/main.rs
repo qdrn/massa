@@ -123,6 +123,7 @@ async fn launch() -> (
         massa_consensus_exports::settings::MAX_GAS_PER_BLOCK,
         network_command_sender.clone(),
         network_event_receiver,
+        shared_storage.clone(),
     )
     .await
     .expect("could not start protocol controller");

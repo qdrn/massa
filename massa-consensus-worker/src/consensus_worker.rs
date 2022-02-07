@@ -614,7 +614,6 @@ impl ConsensusWorker {
         // add block to db
         self.block_db.incoming_block(
             block_id,
-            block,
             operation_set,
             endorsement_ids,
             &mut self.pos,
@@ -1092,14 +1091,15 @@ impl ConsensusWorker {
     async fn process_protocol_event(&mut self, event: ProtocolEvent) -> Result<()> {
         match event {
             ProtocolEvent::ReceivedBlock {
-                block_id,
                 block,
                 operation_set,
                 endorsement_ids,
             } => {
-                massa_trace!("consensus.consensus_worker.process_protocol_event.received_block", { "block_id": block_id, "block": block });
+                massa_trace!(
+                    "consensus.consensus_worker.process_protocol_event.received_block",
+                    { "block_id": block }
+                );
                 self.block_db.incoming_block(
-                    block_id,
                     block,
                     operation_set,
                     endorsement_ids,

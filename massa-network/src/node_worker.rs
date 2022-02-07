@@ -59,7 +59,7 @@ pub enum NodeEventType {
     /// Node we are connected to sent peer list
     ReceivedPeerList(Vec<IpAddr>),
     /// Node we are connected to sent block
-    ReceivedBlock(Block),
+    ReceivedBlock(BlockId),
     /// Node we are connected to sent block header
     ReceivedBlockHeader(BlockHeader),
     /// Node we are connected to asks for a block.

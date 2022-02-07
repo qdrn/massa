@@ -15,4 +15,5 @@ pub use protocol_controller::{
 };
 pub use settings::{ProtocolSettings, CHANNEL_SIZE};
 
+#[cfg(test)]
 pub mod tests;

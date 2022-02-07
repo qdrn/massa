@@ -102,7 +102,7 @@ pub enum NetworkEvent {
     /// A block was received
     ReceivedBlock {
         node: NodeId,
-        block: Block,
+        block: BlockId,
     },
     /// A block header was received
     ReceivedBlockHeader {
@@ -1150,7 +1150,7 @@ impl NetworkWorker {
             NodeEvent(from_node_id, NodeEventType::ReceivedBlock(data)) => {
                 massa_trace!(
                     "network_worker.on_node_event receive NetworkEvent::ReceivedBlock",
-                    {"block_id": data.header.compute_block_id()?, "block": data, "node": from_node_id}
+                    {"block_id": data, "node": from_node_id}
                 );
                 let _ = self
                     .send_network_event(NetworkEvent::ReceivedBlock {

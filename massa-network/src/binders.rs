@@ -143,7 +143,7 @@ impl ReadBinder {
         let (res_msg, serialized) = deserialize_message_with_optional_serialized_object(&self.buf)?;
         self.cursor = 0;
         self.msg_size = None;
-        self.buf.clear();
+        let buf = mem::take(&mut self.buf);
 
         let res_index = self.message_index;
         self.message_index += 1;

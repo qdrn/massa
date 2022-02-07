@@ -18,8 +18,7 @@ use tracing::debug;
 pub enum ProtocolEvent {
     /// A block with a valid signature has been received.
     ReceivedBlock {
-        block_id: BlockId,
-        block: Block,
+        block: BlockId,
         operation_set: Map<OperationId, (usize, u64)>, // (index, validity end period)
         endorsement_ids: Map<EndorsementId, u32>,
     },
