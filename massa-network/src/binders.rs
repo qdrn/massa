@@ -1,7 +1,7 @@
 // Copyright (c) 2021 MASSA LABS <info@massa.net>
 
 //! Flexbuffer layer between raw data and our objects.
-use super::messages::Message;
+use super::messages::{deserialize_message_with_optional_serialized_object, Message};
 use crate::error::NetworkError;
 use crate::establisher::{ReadHalf, WriteHalf};
 use massa_models::{
@@ -9,6 +9,7 @@ use massa_models::{
     SerializeMinBEInt,
 };
 use std::convert::TryInto;
+use std::mem;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// Used to serialize and send data.
@@ -35,11 +36,9 @@ impl WriteBinder {
     ///
     /// # Argument
     /// * msg: date to transmit.
-    pub async fn send(&mut self, msg: &Message) -> Result<u64, NetworkError> {
+    pub async fn send(&mut self, buf: &[u8]) -> Result<u64, NetworkError> {
         //        massa_trace!("binder.send", { "msg": msg });
-        // serialize
-        let bytes_vec = msg.to_bytes_compact()?;
-        let msg_size: u32 = bytes_vec
+        let msg_size: u32 = buf
             .len()
             .try_into()
             .map_err(|_| NetworkError::GeneralProtocolError("message too long".into()))?;
@@ -51,7 +50,7 @@ impl WriteBinder {
             .await?;
 
         // send message
-        self.write_half.write_all(&bytes_vec[..]).await?;
+        self.write_half.write_all(buf).await?;
 
         let res_index = self.message_index;
         self.message_index += 1;
@@ -87,7 +86,7 @@ impl ReadBinder {
     }
 
     /// Awaits the next incoming message and deserializes it. Async cancel-safe.
-    pub async fn next(&mut self) -> Result<Option<(u64, Message)>, NetworkError> {
+    pub async fn next(&mut self) -> Result<Option<(u64, Message, Option<Vec<u8>>)>, NetworkError> {
         let max_message_size = with_serialization_context(|context| context.max_message_size);
 
         // read message size
@@ -141,13 +140,13 @@ impl ReadBinder {
                 }
             }
         }
-        let (res_msg, _res_msg_len) = Message::from_bytes_compact(&self.buf)?;
+        let (res_msg, serialized) = deserialize_message_with_optional_serialized_object(&self.buf)?;
         self.cursor = 0;
         self.msg_size = None;
         self.buf.clear();
 
         let res_index = self.message_index;
         self.message_index += 1;
-        Ok(Some((res_index, res_msg)))
+        Ok(Some((res_index, res_msg, serialized)))
     }
 }

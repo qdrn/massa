@@ -21,6 +21,7 @@ use massa_logging::massa_trace;
 use massa_models::composite::PubkeySig;
 use massa_models::node::NodeId;
 use massa_models::stats::NetworkStats;
+use massa_models::storage::Storage;
 use massa_models::{
     with_serialization_context, DeserializeCompact, DeserializeVarInt, ModelsError,
     SerializeCompact, SerializeVarInt, Version,
@@ -48,12 +49,12 @@ pub enum NetworkCommand {
     /// Send that block to node.
     SendBlock {
         node: NodeId,
-        block: Block,
+        block_id: BlockId,
     },
     /// Send a header to a node.
     SendBlockHeader {
         node: NodeId,
-        header: BlockHeader,
+        block_id: BlockId,
     },
     // (PeerInfo, Vec <(NodeId, bool)>) peer info + list of associated Id nodes in connexion out (true)
     GetPeers(oneshot::Sender<Peers>),
@@ -222,6 +223,8 @@ pub struct NetworkWorker {
         FuturesUnordered<JoinHandle<(NodeId, Result<ConnectionClosureReason, NetworkError>)>>,
     /// Map of connection to ip, is_outgoing.
     active_connections: HashMap<ConnectionId, (IpAddr, bool)>,
+    /// Shared storage.
+    storage: Storage,
     version: Version,
 }
 
@@ -253,6 +256,7 @@ impl NetworkWorker {
             controller_event_tx,
             controller_manager_rx,
         }: NetworkWorkerChannels,
+        storage: Storage,
         version: Version,
     ) -> NetworkWorker {
         let public_key = derive_public_key(&private_key);
@@ -277,6 +281,7 @@ impl NetworkWorker {
             active_nodes: HashMap::new(),
             node_worker_handles: FuturesUnordered::new(),
             active_connections: HashMap::new(),
+            storage,
             version,
         }
     }
@@ -562,6 +567,7 @@ impl NetworkWorker {
                             mpsc::channel::<NodeCommand>(CHANNEL_SIZE);
                         let node_event_tx_clone = self.node_event_tx.clone();
                         let cfg_copy = self.cfg.clone();
+                        let storage = self.storage.clone();
                         let node_fn_handle = tokio::spawn(async move {
                             let res = NodeWorker::new(
                                 cfg_copy,
@@ -570,6 +576,7 @@ impl NetworkWorker {
                                 socket_writer,
                                 node_command_rx,
                                 node_event_tx_clone,
+                                storage,
                             )
                             .run_loop()
                             .await;
@@ -737,11 +744,11 @@ impl NetworkWorker {
                 }
                 self.ban_connection_ids(ban_connection_ids).await
             }
-            NetworkCommand::SendBlockHeader { node, header } => {
-                massa_trace!("network_worker.manage_network_command send NodeCommand::SendBlockHeader", {"block_id": header.compute_block_id()?, "header": header, "node": node});
+            NetworkCommand::SendBlockHeader { node, block_id } => {
+                massa_trace!("network_worker.manage_network_command send NodeCommand::SendBlockHeader", {"block_id": block_id, "node": node});
                 self.forward_message_to_node_or_resend_close_event(
                     &node,
-                    NodeCommand::SendBlockHeader(header),
+                    NodeCommand::SendBlockHeader(block_id),
                 )
                 .await;
             }
@@ -758,14 +765,14 @@ impl NetworkWorker {
                     .await;
                 }
             }
-            NetworkCommand::SendBlock { node, block } => {
+            NetworkCommand::SendBlock { node, block_id } => {
                 massa_trace!(
                     "network_worker.manage_network_command send NodeCommand::SendBlock",
-                    {"hash": block.header.content.compute_hash()?, "block": block, "node": node}
+                    {"block_id": block_id, "node": node}
                 );
                 self.forward_message_to_node_or_resend_close_event(
                     &node,
-                    NodeCommand::SendBlock(block),
+                    NodeCommand::SendBlock(block_id),
                 )
                 .await;
             }
@@ -1076,7 +1083,10 @@ impl NetworkWorker {
                     let mut reader = ReadBinder::new(reader);
                     match tokio::time::timeout(
                         timeout,
-                        futures::future::try_join(writer.send(&msg), reader.next()),
+                        futures::future::try_join(
+                            writer.send(&msg.to_bytes_compact().unwrap()),
+                            reader.next(),
+                        ),
                     )
                     .await
                     {
