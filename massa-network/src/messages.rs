@@ -52,7 +52,7 @@ pub enum Message {
 
 #[derive(IntoPrimitive, Debug, Eq, PartialEq, TryFromPrimitive)]
 #[repr(u32)]
-enum MessageTypeId {
+pub enum MessageTypeId {
     HandshakeInitiation = 0u32,
     HandshakeReply = 1,
     Block = 2,

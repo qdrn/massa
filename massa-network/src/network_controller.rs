@@ -14,6 +14,7 @@ use massa_logging::massa_trace;
 use massa_models::composite::PubkeySig;
 use massa_models::node::NodeId;
 use massa_models::stats::NetworkStats;
+use massa_models::storage::Storage;
 use massa_models::{Block, BlockHeader, BlockId, Endorsement, Operation, Version};
 use massa_signature::{derive_public_key, generate_random_private_key, PrivateKey};
 use std::{
@@ -35,6 +36,7 @@ pub async fn start_network_controller(
     mut establisher: Establisher,
     clock_compensation: i64,
     initial_peers: Option<BootstrapPeers>,
+    storage: Storage,
     version: Version,
 ) -> Result<
     (
@@ -120,6 +122,7 @@ pub async fn start_network_controller(
                 controller_event_tx,
                 controller_manager_rx,
             },
+            storage,
             version,
         )
         .run_loop()
@@ -179,9 +182,9 @@ impl NetworkCommandSender {
     }
 
     /// Send the order to send block.
-    pub async fn send_block(&self, node: NodeId, block: Block) -> Result<(), NetworkError> {
+    pub async fn send_block(&self, node: NodeId, block_id: BlockId) -> Result<(), NetworkError> {
         self.0
-            .send(NetworkCommand::SendBlock { node, block })
+            .send(NetworkCommand::SendBlock { node, block_id })
             .await
             .map_err(|_| NetworkError::ChannelError("could not send SendBlock command".into()))?;
         Ok(())
@@ -203,10 +206,10 @@ impl NetworkCommandSender {
     pub async fn send_block_header(
         &self,
         node: NodeId,
-        header: BlockHeader,
+        block_id: BlockId,
     ) -> Result<(), NetworkError> {
         self.0
-            .send(NetworkCommand::SendBlockHeader { node, header })
+            .send(NetworkCommand::SendBlockHeader { node, block_id })
             .await
             .map_err(|_| {
                 NetworkError::ChannelError("could not send SendBlockHeader command".into())
