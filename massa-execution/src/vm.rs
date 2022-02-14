@@ -184,6 +184,11 @@ impl VM {
     /// runs an SCE-final execution step
     /// See https://github.com/massalabs/massa/wiki/vm_ledger_interaction
     ///
+    /// If the node has already compute the bytecodes and found corresponding
+    /// `ledger_changes`, use it, clear step history and run the `step` again
+    /// otherwise.
+    ///
+    /// Prune old `final_events` if `max_final_events` overflow
     /// # Parameters
     ///   * step: execution step to run
     ///   * max_final_events: max number of events kept in cache (todo should be removed when config become static)
@@ -316,6 +321,12 @@ impl VM {
     }
 
     /// Run code in read-only mode
+    /// Same as `run_step_internal()` but don't save ledger_changes.
+    /// Execute a `bytecode` with an `address` as sender context and a
+    /// `simulated_gas_price` with some input parameters as context.
+    ///
+    /// As resulted and send a `ExecuteReadOnlyResponse` through the result
+    /// sender.
     pub(crate) fn run_read_only(
         &self,
         slot: Slot,
@@ -486,6 +497,12 @@ impl VM {
 
     /// runs an SCE-active execution step
     /// See https://github.com/massalabs/massa/wiki/vm_ledger_interaction
+    ///
+    /// Truncate the history by the number of slots between last added step in
+    /// `step_history` and the `step` in parameter. (todo: explain why)
+    ///
+    /// Call the internal `run_step_internal()` and push the `StepHistoryItem`
+    /// into `self.step_history`.
     ///
     /// # Parameters
     ///   * step: execution step to run
