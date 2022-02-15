@@ -133,7 +133,7 @@ impl VM {
         });
         self.step_history
             .iter()
-            .filter(|item| item.slot >= start && item.slot < end)
+            .filter(|item| item.slot >= start && item.slot <= end)
             .flat_map(|item| {
                 item.events.get_filtered_sc_output_event(
                     start,
@@ -194,7 +194,7 @@ impl VM {
     ///   * max_final_events: max number of events kept in cache (todo should be removed when config become static)
     pub(crate) fn run_final_step(&mut self, step: ExecutionStep, max_final_events: usize) {
         // check if that step was already executed as the earliest active step
-        let history_item = if let Some(cached) = self.pop_cached_step(&step) {
+        let mut history_item = if let Some(cached) = self.pop_cached_step(&step) {
             // if so, pop it
             cached
         } else {
@@ -212,7 +212,10 @@ impl VM {
             .apply_changes(&history_item.ledger_changes);
         ledger_step.final_ledger_slot.slot = step.slot;
 
-        self.final_events.extend(mem::take(&mut context.events));
+        // store the events and clear definitively from the item because the
+        // events should be weaks in memory
+        self.final_events
+            .extend(mem::take(&mut history_item.events));
         self.final_events.prune(max_final_events)
     }
 
