@@ -205,11 +205,11 @@ impl<'a> BlockGraphExport {
                 BlockStatus::Active(a_block) => {
                     if filter(a_block.slot) {
                         let block = block_graph.storage.retrieve_block(hash).unwrap();
-                        let block = block.read();
+                        let stored_block = block.read();
                         export.active_blocks.insert(
                             *hash,
                             ExportCompiledBlock {
-                                header: block.header.clone(),
+                                header: stored_block.block.header.clone(),
                                 children: a_block
                                     .children
                                     .iter()
@@ -283,7 +283,7 @@ pub struct BlockGraph {
     /// All the cliques
     max_cliques: Vec<Clique>,
     /// Blocks that need to be propagated
-    to_propagate: Map<BlockId, (Block, Set<OperationId>, Vec<EndorsementId>)>,
+    to_propagate: Map<BlockId, (Set<OperationId>, Vec<EndorsementId>)>,
     /// List of block ids we think are attack attempts
     attack_attempts: Vec<BlockId>,
     /// Newly final blocks
@@ -598,10 +598,11 @@ impl BlockGraph {
         for b_id in required_active_blocks {
             if let Some(BlockStatus::Active(a_block)) = self.block_statuses.get(&b_id) {
                 let block = self.storage.retrieve_block(&b_id).unwrap();
+                let stored_block = block.read();
                 active_blocks.insert(
                     b_id,
                     ExportActiveBlock {
-                        block: block.read().clone(),
+                        block: stored_block.block.clone(),
                         parents: a_block.parents.clone(),
                         children: a_block.children.clone(),
                         dependencies: a_block.dependencies.clone(),
@@ -910,8 +911,8 @@ impl BlockGraph {
                 .storage
                 .retrieve_block(&same_thread_parent.block)
                 .unwrap();
-            let block = block.read();
-            Address::from_public_key(&block.header.content.creator)
+            let stored_block = block.read();
+            Address::from_public_key(&stored_block.block.header.content.creator)
         };
 
         let endorsers_addresses: Vec<Address> = header
@@ -1084,11 +1085,12 @@ impl BlockGraph {
             };
             if cur_a_block.is_final {
                 let block = self.storage.retrieve_block(&cur_a_block.block).unwrap();
-                let block = block.read();
+                let stored_block = block.read();
 
                 // filters out genesis and final blocks
                 // (step 1.1 in pos.md)
-                final_cycle = block
+                final_cycle = stored_block
+                    .block
                     .header
                     .content
                     .slot
@@ -1145,10 +1147,11 @@ impl BlockGraph {
                     cur_rolls.apply_updates(&applied_updates)?;
 
                     let block = self.storage.retrieve_block(&cur_block_id).unwrap();
-                    let block = block.read();
+                    let stored_block = block.read();
 
                     // (step 4.2 in pos.md)
-                    if block
+                    if stored_block
+                        .block
                         .header
                         .content
                         .slot
@@ -1198,16 +1201,16 @@ impl BlockGraph {
                 if let Some(ops) = active_block.addresses_to_operations.get(address) {
                     for op in ops.iter() {
                         let block = self.storage.retrieve_block(&b_id).unwrap();
-                        let block = block.read();
+                        let stored_block = block.read();
 
                         let (idx, _) = active_block.operation_set.get(op).ok_or_else(|| {
                             GraphError::ContainerInconsistency(format!("op {} should be here", op))
                         })?;
                         let search = OperationSearchResult {
-                            op: block.operations[*idx].clone(),
+                            op: stored_block.block.operations[*idx].clone(),
                             in_pool: false,
                             in_blocks: vec![(
-                                block.header.compute_block_id()?,
+                                stored_block.block.header.compute_block_id()?,
                                 (*idx, active_block.is_final),
                             )]
                             .into_iter()
@@ -1250,11 +1253,11 @@ impl BlockGraph {
                 }
                 BlockStatus::Active(active_block) => {
                     let block = self.storage.retrieve_block(block_id).unwrap();
-                    let block = block.read();
+                    let stored_block = block.read();
                     if active_block.is_final {
-                        ExportBlockStatus::Final(block.clone())
+                        ExportBlockStatus::Final(stored_block.block.clone())
                     } else {
-                        ExportBlockStatus::Active(block.clone())
+                        ExportBlockStatus::Active(stored_block.block.clone())
                     }
                 }
                 BlockStatus::Discarded { reason, .. } => {
@@ -1273,7 +1276,7 @@ impl BlockGraph {
         for block_id in self.active_index.iter() {
             if let Some(BlockStatus::Active(active_block)) = self.block_statuses.get(block_id) {
                 let block = self.storage.retrieve_block(block_id).unwrap();
-                let block = block.read();
+                let stored_block = block.read();
 
                 // check the intersection with the wanted operation ids, and update/insert into results
                 operation_ids
@@ -1282,7 +1285,7 @@ impl BlockGraph {
                         active_block
                             .operation_set
                             .get(op_id)
-                            .map(|(idx, _)| (op_id, idx, &block.operations[*idx]))
+                            .map(|(idx, _)| (op_id, idx, &stored_block.block.operations[*idx]))
                     })
                     .for_each(|(op_id, idx, op)| {
                         let search_new = OperationSearchResult {
@@ -1487,7 +1490,7 @@ impl BlockGraph {
         let mut reprocess = BTreeSet::new();
 
         let block = self.storage.retrieve_block(&block_id).unwrap();
-        let block = block.read();
+        let stored_block = block.read();
 
         massa_trace!("consensus.block_graph.process", { "block_id": block_id });
         // control all the waiting states and try to get a valid block
@@ -1643,7 +1646,13 @@ impl BlockGraph {
                             block_id
                         )));
                     };
-                match self.check_block(&block_id, &*block, &operation_set, pos, current_slot)? {
+                match self.check_block(
+                    &block_id,
+                    &stored_block.block,
+                    &operation_set,
+                    pos,
+                    current_slot,
+                )? {
                     BlockCheckOutcome::Proceed {
                         parents_hash_period,
                         dependencies,
@@ -1658,7 +1667,7 @@ impl BlockGraph {
                             "block_id": block_id
                         });
                         (
-                            block,
+                            stored_block,
                             parents_hash_period,
                             dependencies,
                             incompatibilities,
@@ -1721,14 +1730,17 @@ impl BlockGraph {
                         if reason == DiscardReason::Stale {
                             self.new_stale_blocks.insert(
                                 block_id,
-                                (block.header.content.creator, block.header.content.slot),
+                                (
+                                    stored_block.block.header.content.creator,
+                                    stored_block.block.header.content.slot,
+                                ),
                             );
                         }
                         // add to discard
                         self.block_statuses.insert(
                             block_id,
                             BlockStatus::Discarded {
-                                header: block.header.clone(),
+                                header: stored_block.block.header.clone(),
                                 reason,
                                 sequence_number: BlockGraph::new_sequence_number(
                                     &mut self.sequence_counter,
@@ -1806,16 +1818,18 @@ impl BlockGraph {
             }
         };
 
-        let valid_block_addresses_to_operations =
-            valid_block.involved_addresses(&valid_block_operation_set)?;
-        let valid_block_addresses_to_endorsements =
-            valid_block.addresses_to_endorsements(&valid_block_endorsement_ids)?;
+        let valid_block_addresses_to_operations = valid_block
+            .block
+            .involved_addresses(&valid_block_operation_set)?;
+        let valid_block_addresses_to_endorsements = valid_block
+            .block
+            .addresses_to_endorsements(&valid_block_endorsement_ids)?;
 
         // add block to graph
         self.add_block_to_graph(
             block_id,
             valid_block_parents_hash_period,
-            &valid_block,
+            &valid_block.block,
             valid_block_deps,
             valid_block_incomp,
             valid_block_inherited_incomp_count,
@@ -1836,7 +1850,6 @@ impl BlockGraph {
             self.to_propagate.insert(
                 block_id,
                 (
-                    valid_block.clone(),
                     active.operation_set.keys().copied().collect(),
                     active.endorsement_ids.keys().copied().collect(),
                 ),
@@ -2168,18 +2181,18 @@ impl BlockGraph {
                 }
 
                 let block = self.storage.retrieve_block(&cur_b.block).unwrap();
-                let block = block.read();
+                let stored_block = block.read();
 
                 // check if the parent in tauB has a strictly lower period number than B's parent in tauB
                 // note: cur_b cannot be genesis at gen > 1
                 if BlockGraph::get_full_active_block(
                     &self.block_statuses,
-                    block.header.content.parents[header.content.slot.thread as usize],
+                    stored_block.block.header.content.parents[header.content.slot.thread as usize],
                 )
                 .ok_or_else(||
                     GraphError::ContainerInconsistency(
                         format!("inconsistency inside block statuses searching {} check if the parent in tauB has a strictly lower period number than B's parent in tauB while checking grandpa incompatibility of block {}",
-                        block.header.content.parents[header.content.slot.thread as usize],
+                        stored_block.block.header.content.parents[header.content.slot.thread as usize],
                         block_id)
                     ))?
                 .slot
@@ -2922,17 +2935,17 @@ impl BlockGraph {
                 });
 
                 let block = self.storage.retrieve_block(&active_block.block).unwrap();
-                let block = block.read();
+                let stored_block = block.read();
 
                 // mark as stale
                 self.new_stale_blocks.insert(
                     stale_block_hash,
-                    (block.header.content.creator, active_block.slot),
+                    (stored_block.block.header.content.creator, active_block.slot),
                 );
                 self.block_statuses.insert(
                     stale_block_hash,
                     BlockStatus::Discarded {
-                        header: block.header.clone(),
+                        header: stored_block.block.header.clone(),
                         reason: DiscardReason::Stale,
                         sequence_number: BlockGraph::new_sequence_number(
                             &mut self.sequence_counter,
@@ -3189,7 +3202,7 @@ impl BlockGraph {
             let mut current_block_id = *id;
             while let Some(current_block) = self.get_active_block(&current_block_id) {
                 let block = self.storage.retrieve_block(&current_block_id).unwrap();
-                let block = block.read();
+                let stored_block = block.read();
 
                 // retain block
                 retain_active.insert(current_block_id);
@@ -3197,7 +3210,7 @@ impl BlockGraph {
                 // stop traversing when reaching a block with period number low enough
                 // so that any of its operations will have their validity period expired at the latest final block in thread
                 // note: one more is kept because of the way we iterate
-                if block.header.content.slot.period
+                if current_block.slot.period
                     < self.latest_final_blocks_periods[thread]
                         .1
                         .saturating_sub(self.cfg.operation_validity_periods)
@@ -3206,11 +3219,11 @@ impl BlockGraph {
                 }
 
                 // if not genesis, traverse parent
-                if block.header.content.parents.is_empty() {
+                if stored_block.block.header.content.parents.is_empty() {
                     break;
                 }
 
-                current_block_id = block.header.content.parents[thread as usize];
+                current_block_id = stored_block.block.header.content.parents[thread as usize];
             }
         }
 
@@ -3250,10 +3263,7 @@ impl BlockGraph {
             for thread in 0..self.cfg.thread_count {
                 let mut cursor = self.latest_final_blocks_periods[thread as usize].0; // hash of tha latest final in that thread
                 while let Some(c_block) = self.get_active_block(&cursor) {
-                    let block = self.storage.retrieve_block(&cursor).unwrap();
-                    let block = block.read();
-                    if block.header.content.slot.period < earliest_retained_periods[thread as usize]
-                    {
+                    if c_block.slot.period < earliest_retained_periods[thread as usize] {
                         break;
                     }
                     retain_active.insert(cursor);
@@ -3278,11 +3288,9 @@ impl BlockGraph {
         // this is useful to avoid desync on temporary connection loss
         for a_block in self.active_index.iter() {
             if let Some(BlockStatus::Active(active_block)) = self.block_statuses.get(a_block) {
-                let block = self.storage.retrieve_block(a_block).unwrap();
-                let block = block.read();
                 let (_b_id, latest_final_period) =
-                    self.latest_final_blocks_periods[block.header.content.slot.thread as usize];
-                if block.header.content.slot.period
+                    self.latest_final_blocks_periods[active_block.slot.thread as usize];
+                if active_block.slot.period
                     >= latest_final_period.saturating_sub(self.cfg.force_keep_final_periods)
                 {
                     retain_active.insert(*a_block);
@@ -3299,7 +3307,7 @@ impl BlockGraph {
             .collect();
         for discard_active_h in to_remove {
             let block = self.storage.retrieve_block(&discard_active_h).unwrap();
-            let block = block.read();
+            let stored_block = block.read();
 
             let discarded_active = if let Some(BlockStatus::Active(discarded_active)) =
                 self.block_statuses.remove(&discard_active_h)
@@ -3315,7 +3323,7 @@ impl BlockGraph {
                 if let Some(BlockStatus::Active(active_block)) =
                     self.block_statuses.get_mut(parent_h)
                 {
-                    active_block.children[block.header.content.slot.thread as usize]
+                    active_block.children[discarded_active.slot.thread as usize]
                         .remove(&discard_active_h);
                 }
             }
@@ -3326,7 +3334,7 @@ impl BlockGraph {
             self.block_statuses.insert(
                 discard_active_h,
                 BlockStatus::Discarded {
-                    header: block.header.clone(),
+                    header: stored_block.block.header.clone(),
                     reason: DiscardReason::Final,
                     sequence_number: BlockGraph::new_sequence_number(&mut self.sequence_counter),
                 },
@@ -3501,8 +3509,8 @@ impl BlockGraph {
                     HeaderOrBlock::Header(h) => h,
                     HeaderOrBlock::Block(block_id, ..) => {
                         let block = self.storage.retrieve_block(&block_id).unwrap();
-                        let block = block.read();
-                        block.header.clone()
+                        let stored_block = block.read();
+                        stored_block.block.header.clone()
                     }
                 };
                 massa_trace!("consensus.block_graph.prune_waiting_for_dependencies", {"hash": block_id, "reason": reason_opt});
@@ -3657,8 +3665,8 @@ impl BlockGraph {
                 if let Some(a_b) = self.get_active_block(b_id) {
                     if a_b.is_final {
                         let block = self.storage.retrieve_block(b_id).unwrap();
-                        let block = block.read();
-                        return Some((*b_id, block.clone()));
+                        let stored_block = block.read();
+                        return Some((*b_id, stored_block.block.clone()));
                     }
                 }
                 None
@@ -3666,11 +3674,11 @@ impl BlockGraph {
             .collect()
     }
 
-    /// Get the headers to be propagated.
+    /// Get the block id's to be propagated.
     /// Must be called by the consensus worker within `block_db_changed`.
     pub fn get_blocks_to_propagate(
         &mut self,
-    ) -> Map<BlockId, (Block, Set<OperationId>, Vec<EndorsementId>)> {
+    ) -> Map<BlockId, (Set<OperationId>, Vec<EndorsementId>)> {
         mem::take(&mut self.to_propagate)
     }
 
@@ -3701,8 +3709,8 @@ impl BlockGraph {
             if let Some(BlockStatus::Active(ab)) = self.block_statuses.get(b_id) {
                 if let Some(eds) = ab.addresses_to_endorsements.get(&address) {
                     let block = self.storage.retrieve_block(b_id).unwrap();
-                    let block = block.read();
-                    for e in block.header.content.endorsements.iter() {
+                    let stored_block = block.read();
+                    for e in stored_block.block.header.content.endorsements.iter() {
                         let id = e.compute_endorsement_id()?;
                         if eds.contains(&id) {
                             res.insert(id, e.clone());
@@ -3724,14 +3732,14 @@ impl BlockGraph {
         for block_id in self.active_index.iter() {
             if let Some(BlockStatus::Active(ab)) = self.block_statuses.get(block_id) {
                 let block = self.storage.retrieve_block(block_id).unwrap();
-                let block = block.read();
+                let stored_block = block.read();
                 // list blocks with wanted endorsements
                 if endorsements
                     .intersection(&ab.endorsement_ids.keys().copied().collect())
                     .collect::<HashSet<_>>()
                     .is_empty()
                 {
-                    for e in block.header.content.endorsements.iter() {
+                    for e in stored_block.block.header.content.endorsements.iter() {
                         let id = e.compute_endorsement_id()?;
                         if endorsements.contains(&id) {
                             res.entry(id)
