@@ -1,7 +1,7 @@
 // Copyright (c) 2021 MASSA LABS <info@massa.net>
 
 //! Flexbuffer layer between raw data and our objects.
-use super::messages::Message;
+use super::messages::{deserialize_message_with_optional_serialized_object, Message};
 use crate::error::NetworkError;
 use crate::establisher::{ReadHalf, WriteHalf};
 use massa_models::{
@@ -86,7 +86,7 @@ impl ReadBinder {
     }
 
     /// Awaits the next incoming message and deserializes it. Async cancel-safe.
-    pub async fn next(&mut self) -> Result<Option<(u64, Message, Vec<u8>)>, NetworkError> {
+    pub async fn next(&mut self) -> Result<Option<(u64, Message, Option<Vec<u8>>)>, NetworkError> {
         let max_message_size = with_serialization_context(|context| context.max_message_size);
 
         // read message size
@@ -140,13 +140,13 @@ impl ReadBinder {
                 }
             }
         }
-        let (res_msg, _res_msg_len) = Message::from_bytes_compact(&self.buf)?;
+        let (res_msg, serialized) = deserialize_message_with_optional_serialized_object(&self.buf)?;
         self.cursor = 0;
         self.msg_size = None;
-        let buf = mem::take(&mut self.buf);
+        self.buf.clear();
 
         let res_index = self.message_index;
         self.message_index += 1;
-        Ok(Some((res_index, res_msg, buf)))
+        Ok(Some((res_index, res_msg, serialized)))
     }
 }

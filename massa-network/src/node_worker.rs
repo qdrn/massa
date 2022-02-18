@@ -188,9 +188,13 @@ impl NodeWorker {
                         let bytes_vec: Vec<u8> = match to_send {
                             ToSend::Msg(msg) => msg.to_bytes_compact().unwrap(),
                             ToSend::Block(block_id) => {
+                                // TODO: precisely allocate?
+                                let mut res: Vec<u8> = Vec::new();
+                                res.extend(u32::from(MessageTypeId::Block).to_varint_bytes());
                                 let block = storage.retrieve_block(&block_id).unwrap();
                                 let mut stored_block = block.write();
-                                mem::take(&mut stored_block.serialized)
+                                res.extend(mem::take(&mut stored_block.serialized));
+                                res
                             }
                             ToSend::Header(block_id) => {
                                 // TODO: precisely allocate?
@@ -289,7 +293,7 @@ impl NodeWorker {
 
                 // incoming socket data
                 res = self.socket_reader.next() => match res {
-                    Ok(Some((index, msg, buff))) => {
+                    Ok(Some((index, msg, serialized))) => {
                         massa_trace!(
                             "node_worker.run_loop. receive self.socket_reader.next()", {"index": index});
                         match msg {
@@ -300,7 +304,7 @@ impl NodeWorker {
                                 );
 
                                 // TODO: avoid computing id, and cloning block.
-                                self.storage.store_block(block.header.compute_block_id()?, block.clone(), buff);
+                                self.storage.store_block(block.header.compute_block_id()?, block.clone(), serialized.unwrap());
                                 self.send_node_event(NodeEvent(self.node_id, NodeEventType::ReceivedBlock(block))).await;
                             },
                             Message::BlockHeader(header) => {
