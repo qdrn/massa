@@ -145,6 +145,8 @@ impl ConsensusWorker {
         // notify execution module of current blockclique and final blocks
         // we need to do this because the bootstrap snapshots of the executor vs the consensus may not have been taken in sync
         // because the two modules run concurrently and out of sync
+        
+        // TODO: use shared storage.
         channels
             .execution_command_sender
             .update_blockclique(
