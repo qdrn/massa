@@ -1,3 +1,4 @@
 build/
 node_modules
 ledger.json
+!build/event_test.wasm
