@@ -1,16 +1,21 @@
 // Copyright (c) 2022 MASSA LABS <info@massa.net>
 
 use crate::{
+    array_from_slice,
     error::ModelsResult as Result,
+    node_configuration::ADDRESS_SIZE_BYTES,
     prehash::{Map, Set},
-    u8_from_slice, Address, Amount, DeserializeCompact, ModelsError, SerializeCompact,
+    u8_from_slice, Address, Amount, DeserializeCompact, DeserializeVarInt, ModelsError,
+    SerializeCompact, SerializeVarInt,
 };
 use core::usize;
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map;
 
+/// a consensus ledger entry
 #[derive(Debug, Default, Deserialize, Clone, Copy, Serialize)]
 pub struct LedgerData {
+    /// the balance in coins
     pub balance: Amount,
 }
 
@@ -36,12 +41,15 @@ impl DeserializeCompact for LedgerData {
 }
 
 impl LedgerData {
+    /// new `LedgerData` from an initial balance
     pub fn new(starting_balance: Amount) -> LedgerData {
         LedgerData {
             balance: starting_balance,
         }
     }
 
+    /// apply a `LedgerChange` for an entry
+    /// Can fail in overflow or underflow occur
     pub fn apply_change(&mut self, change: &LedgerChange) -> Result<()> {
         if change.balance_increment {
             self.balance = self
@@ -74,9 +82,9 @@ impl LedgerData {
 /// A balance change that can be applied to an address
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LedgerChange {
-    /// Amount to add or substract
+    /// Amount to add or subtract
     pub balance_delta: Amount,
-    /// whether to increment or decrement balance of delta
+    /// whether to increment or decrements balance of delta
     pub balance_increment: bool,
 }
 
@@ -121,6 +129,7 @@ impl LedgerChange {
         Ok(())
     }
 
+    /// true if the change is 0
     pub fn is_nil(&self) -> bool {
         self.balance_delta == Amount::default()
     }
@@ -169,16 +178,17 @@ impl DeserializeCompact for LedgerChange {
     }
 }
 
-/// Map an address to a LedgerChange
+/// Map an address to a `LedgerChange`
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct LedgerChanges(pub Map<Address, LedgerChange>);
 
 impl LedgerChanges {
+    /// addresses that are impacted by these ledger changes
     pub fn get_involved_addresses(&self) -> Set<Address> {
         self.0.keys().copied().collect()
     }
 
-    /// applies a LedgerChange
+    /// applies a `LedgerChange`
     pub fn apply(&mut self, addr: &Address, change: &LedgerChange) -> Result<()> {
         match self.0.entry(*addr) {
             hash_map::Entry::Occupied(mut occ) => {
@@ -198,7 +208,7 @@ impl LedgerChanges {
         Ok(())
     }
 
-    /// chain with another LedgerChange
+    /// chain with another `LedgerChange`
     pub fn chain(&mut self, other: &LedgerChanges) -> Result<()> {
         for (addr, change) in other.0.iter() {
             self.apply(addr, change)?;
@@ -207,7 +217,7 @@ impl LedgerChanges {
     }
 
     /// merge another ledger changes into self, overwriting existing data
-    /// addrs that are in not other are removed from self
+    /// addresses that are in not other are removed from self
     pub fn sync_from(&mut self, addrs: &Set<Address>, mut other: LedgerChanges) {
         for addr in addrs.iter() {
             if let Some(new_val) = other.0.remove(addr) {
@@ -284,5 +294,77 @@ impl LedgerChanges {
                 balance_increment: true,
             },
         )
+    }
+}
+
+impl SerializeCompact for LedgerChanges {
+    /// ## Example
+    /// ```rust
+    /// # use massa_models::{SerializeCompact, DeserializeCompact, SerializationContext, Address, Amount};
+    /// # use std::str::FromStr;
+    /// # use massa_models::ledger_models::{LedgerChanges, LedgerChange};
+    /// # let ledger_changes = LedgerChanges(vec![
+    /// #   (
+    /// #       Address::from_bs58_check("2oxLZc6g6EHfc5VtywyPttEeGDxWq3xjvTNziayWGDfxETZVTi".into()).unwrap(),
+    /// #       LedgerChange {
+    /// #           balance_delta: Amount::from_str("1149").unwrap(),
+    /// #           balance_increment: true
+    /// #       },
+    /// #   ),
+    /// #   (
+    /// #       Address::from_bs58_check("2mvD6zEvo8gGaZbcs6AYTyWKFonZaKvKzDGRsiXhZ9zbxPD11q".into()).unwrap(),
+    /// #       LedgerChange {
+    /// #           balance_delta: Amount::from_str("1020").unwrap(),
+    /// #           balance_increment: true
+    /// #       },
+    /// #   )
+    /// # ].into_iter().collect());
+    /// # massa_models::init_serialization_context(massa_models::SerializationContext::default());
+    /// let bytes = ledger_changes.clone().to_bytes_compact().unwrap();
+    /// let (res, _) = LedgerChanges::from_bytes_compact(&bytes).unwrap();
+    /// for (address, data) in &ledger_changes.0 {
+    ///    assert!(res.0.iter().filter(|(addr, dta)| &address == addr && dta.to_bytes_compact().unwrap() == data.to_bytes_compact().unwrap()).count() == 1)
+    /// }
+    /// assert_eq!(ledger_changes.0.len(), res.0.len());
+    /// ```
+    fn to_bytes_compact(&self) -> Result<Vec<u8>, ModelsError> {
+        let mut res: Vec<u8> = Vec::new();
+
+        let entry_count: u64 = self.0.len().try_into().map_err(|err| {
+            ModelsError::SerializeError(format!(
+                "too many entries in ConsensusLedgerSubset: {}",
+                err
+            ))
+        })?;
+        res.extend(entry_count.to_varint_bytes());
+        for (address, data) in self.0.iter() {
+            res.extend(address.to_bytes());
+            res.extend(&data.to_bytes_compact()?);
+        }
+
+        Ok(res)
+    }
+}
+
+impl DeserializeCompact for LedgerChanges {
+    fn from_bytes_compact(buffer: &[u8]) -> Result<(Self, usize), ModelsError> {
+        let mut cursor = 0usize;
+
+        let (entry_count, delta) = u64::from_varint_bytes(&buffer[cursor..])?;
+        // TODO: add entry_count checks ... see #1200
+        cursor += delta;
+
+        let mut ledger_subset = LedgerChanges(Map::default());
+        for _ in 0..entry_count {
+            let address = Address::from_bytes(&array_from_slice(&buffer[cursor..])?);
+            cursor += ADDRESS_SIZE_BYTES;
+
+            let (data, delta) = LedgerChange::from_bytes_compact(&buffer[cursor..])?;
+            cursor += delta;
+
+            ledger_subset.0.insert(address, data);
+        }
+
+        Ok((ledger_subset, cursor))
     }
 }

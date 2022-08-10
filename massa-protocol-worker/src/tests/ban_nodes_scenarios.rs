@@ -3,10 +3,10 @@
 use super::tools::protocol_test;
 use massa_models::prehash::{Map, Set};
 use massa_models::{BlockId, Slot};
-use massa_network::NetworkCommand;
+use massa_network_exports::NetworkCommand;
 use massa_protocol_exports::tests::tools;
-use massa_protocol_exports::ProtocolEvent;
-use massa_protocol_exports::ProtocolPoolEvent;
+use massa_protocol_exports::{BlocksResults, ProtocolEvent, ProtocolPoolEvent};
+use massa_signature::KeyPair;
 use serial_test::serial;
 use std::collections::HashSet;
 use std::time::Duration;
@@ -28,16 +28,16 @@ async fn test_protocol_bans_node_sending_block_with_invalid_signature() {
             let creator_node = nodes.pop().expect("Failed to get node info.");
 
             // 1. Create a block coming from one node.
-            let mut block = tools::create_block(&creator_node.private_key, &creator_node.id.0);
+            let mut block = tools::create_block(&creator_node.keypair);
 
             // 2. Change the slot.
-            block.header.content.slot = Slot::new(1, 1);
+            block.content.header.content.slot = Slot::new(1, 1);
 
             // 3. Send block to protocol.
             network_controller.send_block(creator_node.id, block).await;
 
             // The node is banned.
-            tools::assert_banned_node(creator_node.id, &mut network_controller).await;
+            tools::assert_banned_nodes(vec![creator_node.id], &mut network_controller).await;
 
             // Check protocol does not send block to consensus.
             match tools::wait_protocol_event(&mut protocol_event_receiver, 1000.into(), |evt| {
@@ -82,7 +82,7 @@ async fn test_protocol_bans_node_sending_operation_with_invalid_signature() {
 
             // 1. Create an operation
             let mut operation =
-                tools::create_operation_with_expire_period(&creator_node.private_key, 1);
+                tools::create_operation_with_expire_period(&creator_node.keypair, 1);
 
             // 2. Change the validity period.
             operation.content.expire_period += 10;
@@ -93,7 +93,7 @@ async fn test_protocol_bans_node_sending_operation_with_invalid_signature() {
                 .await;
 
             // The node is banned.
-            tools::assert_banned_node(creator_node.id, &mut network_controller).await;
+            tools::assert_banned_nodes(vec![creator_node.id], &mut network_controller).await;
 
             // Check protocol does not send operation to pool.
             match tools::wait_protocol_pool_event(
@@ -138,18 +138,18 @@ async fn test_protocol_bans_node_sending_header_with_invalid_signature() {
             let to_ban_node = nodes.pop().expect("Failed to get node info.");
 
             // 1. Create a block coming from one node.
-            let mut block = tools::create_block(&to_ban_node.private_key, &to_ban_node.id.0);
+            let mut block = tools::create_block(&to_ban_node.keypair);
 
             // 2. Change the slot.
-            block.header.content.slot = Slot::new(1, 1);
+            block.content.header.content.slot = Slot::new(1, 1);
 
             // 3. Send header to protocol.
             network_controller
-                .send_header(to_ban_node.id, block.header)
+                .send_header(to_ban_node.id, block.content.header)
                 .await;
 
             // The node is banned.
-            tools::assert_banned_node(to_ban_node.id, &mut network_controller).await;
+            tools::assert_banned_nodes(vec![to_ban_node.id], &mut network_controller).await;
 
             // Check protocol does not send block to consensus.
             match tools::wait_protocol_event(&mut protocol_event_receiver, 1000.into(), |evt| {
@@ -172,11 +172,11 @@ async fn test_protocol_bans_node_sending_header_with_invalid_signature() {
                 .expect("Node not created.");
 
             // Create a valid block from the other node.
-            let block = tools::create_block(&not_banned.private_key, &not_banned.id.0);
+            let block = tools::create_block(&not_banned.keypair);
 
             // 3. Send header to protocol, via the banned node.
             network_controller
-                .send_header(to_ban_node.id, block.header)
+                .send_header(to_ban_node.id, block.content.header)
                 .await;
 
             // Check protocol does not send block to consensus.
@@ -225,11 +225,11 @@ async fn test_protocol_does_not_asks_for_block_from_banned_node_who_propagated_h
             let creator_node = nodes.pop().expect("Failed to get node info.");
 
             // 1. Create a block coming from node creator_node.
-            let block = tools::create_block(&creator_node.private_key, &creator_node.id.0);
+            let block = tools::create_block(&creator_node.keypair);
 
             // 2. Send header to protocol.
             network_controller
-                .send_header(creator_node.id, block.header.clone())
+                .send_header(creator_node.id, block.content.header.clone())
                 .await;
 
             // Check protocol sends header to consensus.
@@ -247,19 +247,19 @@ async fn test_protocol_does_not_asks_for_block_from_banned_node_who_propagated_h
                 };
 
             // 3. Check that protocol sent the right header to consensus.
-            let expected_hash = block
-                .header
-                .compute_block_id()
-                .expect("Failed to compute hash.");
+            let expected_hash = block.id;
+
             assert_eq!(expected_hash, received_hash);
 
             // 4. Get the node banned.
-            let mut block = tools::create_block(&creator_node.private_key, &creator_node.id.0);
-            block.header.content.slot = Slot::new(1, 1);
+            // New keypair to avoid getting same block id
+            let keypair = KeyPair::generate();
+            let mut block = tools::create_block(&keypair);
+            block.content.header.content.slot = Slot::new(1, 1);
             network_controller
-                .send_header(creator_node.id, block.header)
+                .send_header(creator_node.id, block.content.header)
                 .await;
-            tools::assert_banned_node(creator_node.id, &mut network_controller).await;
+            tools::assert_banned_nodes(vec![creator_node.id], &mut network_controller).await;
 
             // 5. Ask for block.
             protocol_command_sender
@@ -316,12 +316,9 @@ async fn test_protocol_does_not_send_blocks_when_asked_for_by_banned_node() {
             network_controller.close_connection(nodes[2].id).await;
 
             // 2. Create a block coming from creator_node.
-            let block = tools::create_block(&creator_node.private_key, &creator_node.id.0);
+            let block = tools::create_block(&creator_node.keypair);
 
-            let expected_hash = block
-                .header
-                .compute_block_id()
-                .expect("Failed to compute hash.");
+            let expected_hash = block.id;
 
             // 3. Simulate two nodes asking for a block.
             for node in nodes.iter().take(2) {
@@ -351,16 +348,16 @@ async fn test_protocol_does_not_send_blocks_when_asked_for_by_banned_node() {
             }
 
             // Get one node banned.
-            let mut bad_block = tools::create_block(&nodes[1].private_key, &nodes[1].id.0);
-            bad_block.header.content.slot = Slot::new(1, 1);
+            let mut bad_block = tools::create_block(&nodes[1].keypair);
+            bad_block.content.header.content.slot = Slot::new(1, 1);
             network_controller
-                .send_header(nodes[1].id, bad_block.header.clone())
+                .send_header(nodes[1].id, bad_block.content.header.clone())
                 .await;
-            tools::assert_banned_node(nodes[1].id, &mut network_controller).await;
+            tools::assert_banned_nodes(vec![nodes[1].id], &mut network_controller).await;
 
             // 4. Simulate consensus sending block.
-            let mut results = Map::default();
-            results.insert(expected_hash, Some((block, None, None)));
+            let mut results: BlocksResults = Map::default();
+            results.insert(expected_hash, Some((None, None)));
             protocol_command_sender
                 .send_get_blocks_results(results)
                 .await
@@ -374,12 +371,8 @@ async fn test_protocol_does_not_send_blocks_when_asked_for_by_banned_node() {
                     .wait_command(1000.into(), send_block_or_header_cmd_filter)
                     .await
                 {
-                    Some(NetworkCommand::SendBlock { node, block }) => {
-                        let hash = block
-                            .header
-                            .compute_block_id()
-                            .expect("Failed to compute hash.");
-                        assert_eq!(expected_hash, hash);
+                    Some(NetworkCommand::SendBlock { node, block_id }) => {
+                        assert_eq!(expected_hash, block_id);
                         assert!(expecting_block.remove(&node));
                     }
                     Some(NetworkCommand::SendBlockHeader { .. }) => {
@@ -429,18 +422,15 @@ async fn test_protocol_bans_all_nodes_propagating_an_attack_attempt() {
             let nodes = tools::create_and_connect_nodes(4, &mut network_controller).await;
 
             // Create a block coming from one node.
-            let block = tools::create_block(&nodes[0].private_key, &nodes[0].id.0);
+            let block = tools::create_block(&nodes[0].keypair);
 
-            let expected_hash = block
-                .header
-                .compute_block_id()
-                .expect("Failed to compute hash.");
+            let expected_hash = block.id;
 
             // Propagate the block via 4 nodes.
             for (idx, creator_node) in nodes.iter().enumerate() {
                 // Send block to protocol.
                 network_controller
-                    .send_header(creator_node.id, block.header.clone())
+                    .send_header(creator_node.id, block.content.header.clone())
                     .await;
 
                 // Check protocol sends header to consensus (only the 1st time: later, there is caching).
@@ -500,7 +490,7 @@ async fn test_protocol_bans_all_nodes_propagating_an_attack_attempt() {
 
             // Make sure protocol did not ban the node that did not know about the block.
             let ban_cmd_filter = |cmd| match cmd {
-                cmd @ NetworkCommand::Ban { .. } => Some(cmd),
+                cmd @ NetworkCommand::NodeBanByIds { .. } => Some(cmd),
                 _ => None,
             };
             let got_more_commands = network_controller
@@ -540,12 +530,12 @@ async fn test_protocol_removes_banned_node_on_disconnection() {
             let creator_node = nodes.pop().expect("Failed to get node info.");
 
             // Get the node banned.
-            let mut block = tools::create_block(&creator_node.private_key, &creator_node.id.0);
-            block.header.content.slot = Slot::new(1, 1);
+            let mut block = tools::create_block(&creator_node.keypair);
+            block.content.header.content.slot = Slot::new(1, 1);
             network_controller
-                .send_header(creator_node.id, block.header)
+                .send_header(creator_node.id, block.content.header)
                 .await;
-            tools::assert_banned_node(creator_node.id, &mut network_controller).await;
+            tools::assert_banned_nodes(vec![creator_node.id], &mut network_controller).await;
 
             // Close the connection.
             network_controller.close_connection(creator_node.id).await;
@@ -554,9 +544,9 @@ async fn test_protocol_removes_banned_node_on_disconnection() {
             network_controller.new_connection(creator_node.id).await;
 
             // The node is not banned anymore.
-            let block = tools::create_block(&creator_node.private_key, &creator_node.id.0);
+            let block = tools::create_block(&creator_node.keypair);
             network_controller
-                .send_header(creator_node.id, block.header.clone())
+                .send_header(creator_node.id, block.content.header.clone())
                 .await;
 
             // Check protocol sends header to consensus.
@@ -574,10 +564,7 @@ async fn test_protocol_removes_banned_node_on_disconnection() {
                 };
 
             // Check that protocol sent the right header to consensus.
-            let expected_hash = block
-                .header
-                .compute_block_id()
-                .expect("Failed to compute hash.");
+            let expected_hash = block.id;
             assert_eq!(expected_hash, received_hash);
             (
                 network_controller,

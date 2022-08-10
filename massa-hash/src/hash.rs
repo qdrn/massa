@@ -2,11 +2,28 @@
 
 use crate::error::MassaHashError;
 use crate::settings::HASH_SIZE_BYTES;
-use bitcoin_hashes;
-use std::{convert::TryInto, str::FromStr};
+use massa_serialization::Deserializer;
+use nom::{
+    error::{context, ContextError, ParseError},
+    IResult,
+};
+use std::{cmp::Ordering, convert::TryInto, str::FromStr};
 
-#[derive(Eq, PartialEq, Ord, PartialOrd, Copy, Clone, Hash)]
-pub struct Hash(bitcoin_hashes::sha256::Hash);
+/// Hash wrapper, the underlying hash type is Blake3
+#[derive(Eq, PartialEq, Copy, Clone, Hash)]
+pub struct Hash(blake3::Hash);
+
+impl PartialOrd for Hash {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        self.0.as_bytes().partial_cmp(other.0.as_bytes())
+    }
+}
+
+impl Ord for Hash {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.0.as_bytes().cmp(other.0.as_bytes())
+    }
+}
 
 impl std::fmt::Display for Hash {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -25,19 +42,18 @@ impl Hash {
     ///
     /// # Example
     ///  ```
-    /// # use massa_hash::hash::Hash;
+    /// # use massa_hash::Hash;
     /// let hash = Hash::compute_from(&"hello world".as_bytes());
     /// ```
     pub fn compute_from(data: &[u8]) -> Self {
-        use bitcoin_hashes::Hash;
-        Hash(bitcoin_hashes::sha256::Hash::hash(data))
+        Hash(blake3::hash(data))
     }
 
-    /// Serialize a Hash using bs58 encoding with checksum.
+    /// Serialize a Hash using `bs58` encoding with checksum.
     ///
     /// # Example
     ///  ```
-    /// # use massa_hash::hash::Hash;
+    /// # use massa_hash::Hash;
     /// let hash = Hash::compute_from(&"hello world".as_bytes());
     /// let serialized: String = hash.to_bs58_check();
     /// ```
@@ -49,34 +65,32 @@ impl Hash {
     ///
     /// # Example
     ///  ```
-    /// # use massa_hash::hash::Hash;
+    /// # use massa_hash::Hash;
     /// let hash = Hash::compute_from(&"hello world".as_bytes());
     /// let serialized = hash.to_bytes();
     /// ```
-    pub fn to_bytes(&self) -> [u8; HASH_SIZE_BYTES] {
-        use bitcoin_hashes::Hash;
-        *self.0.as_inner()
+    pub fn to_bytes(&self) -> &[u8; HASH_SIZE_BYTES] {
+        self.0.as_bytes()
     }
 
     /// Convert into bytes.
     ///
     /// # Example
     ///  ```
-    /// # use massa_hash::hash::Hash;
+    /// # use massa_hash::Hash;
     /// let hash = Hash::compute_from(&"hello world".as_bytes());
     /// let serialized = hash.into_bytes();
     /// ```
     pub fn into_bytes(self) -> [u8; HASH_SIZE_BYTES] {
-        use bitcoin_hashes::Hash;
-        self.0.into_inner()
+        *self.0.as_bytes()
     }
 
-    /// Deserialize using bs58 encoding with checksum.
+    /// Deserialize using `bs58` encoding with checksum.
     ///
     /// # Example
     ///  ```
     /// # use serde::{Deserialize, Serialize};
-    /// # use massa_hash::hash::Hash;
+    /// # use massa_hash::Hash;
     /// let hash = Hash::compute_from(&"hello world".as_bytes());
     /// let serialized: String = hash.to_bs58_check();
     /// let deserialized: Hash = Hash::from_bs58_check(&serialized).unwrap();
@@ -86,12 +100,12 @@ impl Hash {
             .with_check(None)
             .into_vec()
             .map_err(|err| MassaHashError::ParsingError(format!("{}", err)))?;
-        Hash::from_bytes(
+        Ok(Hash::from_bytes(
             &decoded_bs58_check
                 .as_slice()
                 .try_into()
                 .map_err(|err| MassaHashError::ParsingError(format!("{}", err)))?,
-        )
+        ))
     }
 
     /// Deserialize a Hash as bytes.
@@ -99,32 +113,64 @@ impl Hash {
     /// # Example
     ///  ```
     /// # use serde::{Deserialize, Serialize};
-    /// # use massa_hash::hash::Hash;
+    /// # use massa_hash::Hash;
     /// let hash = Hash::compute_from(&"hello world".as_bytes());
     /// let serialized = hash.into_bytes();
-    /// let deserialized: Hash = Hash::from_bytes(&serialized).unwrap();
+    /// let deserialized: Hash = Hash::from_bytes(&serialized);
     /// ```
-    pub fn from_bytes(data: &[u8; HASH_SIZE_BYTES]) -> Result<Hash, MassaHashError> {
-        use bitcoin_hashes::Hash;
-        Ok(Hash(
-            bitcoin_hashes::sha256::Hash::from_slice(&data[..])
-                .map_err(|err| MassaHashError::ParsingError(format!("{}", err)))?,
-        ))
+    pub fn from_bytes(data: &[u8; HASH_SIZE_BYTES]) -> Hash {
+        Hash(blake3::Hash::from(*data))
+    }
+}
+
+/// Deserializer for `Hash`
+#[derive(Default)]
+pub struct HashDeserializer;
+
+impl HashDeserializer {
+    /// Creates a deserializer for `Hash`
+    pub const fn new() -> Self {
+        Self
+    }
+}
+
+impl Deserializer<Hash> for HashDeserializer {
+    fn deserialize<'a, E: ParseError<&'a [u8]> + ContextError<&'a [u8]>>(
+        &self,
+        buffer: &'a [u8],
+    ) -> IResult<&'a [u8], Hash, E> {
+        context("Failed hash deserialization", |input: &'a [u8]| {
+            if buffer.len() < HASH_SIZE_BYTES {
+                return Err(nom::Err::Error(ParseError::from_error_kind(
+                    input,
+                    nom::error::ErrorKind::LengthValue,
+                )));
+            }
+            Ok((
+                &buffer[HASH_SIZE_BYTES..],
+                Hash::from_bytes(&buffer[..HASH_SIZE_BYTES].try_into().map_err(|_| {
+                    nom::Err::Error(ParseError::from_error_kind(
+                        input,
+                        nom::error::ErrorKind::Fail,
+                    ))
+                })?),
+            ))
+        })(buffer)
     }
 }
 
 impl ::serde::Serialize for Hash {
-    /// ::serde::Serialize trait for Hash
+    /// `::serde::Serialize` trait for Hash
     /// if the serializer is human readable,
-    /// serialization is done using serialize_bs58_check
-    /// else, it uses serialize_binary
+    /// serialization is done using `serialize_bs58_check`
+    /// else, it uses `serialize_binary`
     ///
     /// # Example
     ///
     /// Human readable serialization :
     /// ```
     /// # use serde::{Deserialize, Serialize};
-    /// # use massa_hash::hash::Hash;
+    /// # use massa_hash::Hash;
     /// let hash = Hash::compute_from(&"hello world".as_bytes());
     /// let serialized: String = serde_json::to_string(&hash).unwrap();
     /// ```
@@ -133,22 +179,22 @@ impl ::serde::Serialize for Hash {
         if s.is_human_readable() {
             s.collect_str(&self.to_bs58_check())
         } else {
-            s.serialize_bytes(&self.to_bytes())
+            s.serialize_bytes(self.to_bytes())
         }
     }
 }
 
 impl<'de> ::serde::Deserialize<'de> for Hash {
-    /// ::serde::Deserialize trait for Hash
+    /// `::serde::Deserialize` trait for Hash
     /// if the deserializer is human readable,
-    /// deserialization is done using deserialize_bs58_check
-    /// else, it uses deserialize_binary
+    /// deserialization is done using `deserialize_bs58_check`
+    /// else, it uses `deserialize_binary`
     ///
     /// # Example
     ///
     /// Human readable deserialization :
     /// ```
-    /// # use massa_hash::hash::Hash;
+    /// # use massa_hash::Hash;
     /// # use serde::{Deserialize, Serialize};
     /// let hash = Hash::compute_from(&"hello world".as_bytes());
     /// let serialized: String = serde_json::to_string(&hash).unwrap();
@@ -199,7 +245,7 @@ impl<'de> ::serde::Deserialize<'de> for Hash {
                 where
                     E: ::serde::de::Error,
                 {
-                    Hash::from_bytes(v.try_into().map_err(E::custom)?).map_err(E::custom)
+                    Ok(Hash::from_bytes(v.try_into().map_err(E::custom)?))
                 }
             }
 
@@ -240,9 +286,9 @@ mod tests {
         let data = "abc".as_bytes();
         let hash = Hash::compute_from(data);
         let hash_ref: [u8; HASH_SIZE_BYTES] = [
-            186, 120, 22, 191, 143, 1, 207, 234, 65, 65, 64, 222, 93, 174, 34, 35, 176, 3, 97, 163,
-            150, 23, 122, 156, 180, 16, 255, 97, 242, 0, 21, 173,
+            100, 55, 179, 172, 56, 70, 81, 51, 255, 182, 59, 117, 39, 58, 141, 181, 72, 197, 88,
+            70, 93, 121, 219, 3, 253, 53, 156, 108, 213, 189, 157, 133,
         ];
-        assert_eq!(hash.to_bytes(), hash_ref);
+        assert_eq!(hash.into_bytes(), hash_ref);
     }
 }

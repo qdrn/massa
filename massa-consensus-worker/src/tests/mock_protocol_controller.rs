@@ -1,6 +1,6 @@
 // Copyright (c) 2022 MASSA LABS <info@massa.net>
 
-use massa_models::{constants::CHANNEL_SIZE, Block, BlockHeader, BlockId};
+use massa_models::{constants::CHANNEL_SIZE, BlockId, WrappedBlock, WrappedHeader};
 use massa_protocol_exports::{
     ProtocolCommand, ProtocolCommandSender, ProtocolEvent, ProtocolEventReceiver,
 };
@@ -44,13 +44,13 @@ impl MockProtocolController {
         }
     }
 
-    // Note: if you care about the operation set, use another method.
-    pub async fn receive_block(&mut self, block: Block) {
-        let block_id = block.header.compute_block_id().unwrap();
+    /// Note: if you care about the operation set, use another method.
+    pub async fn receive_block(&mut self, block: WrappedBlock) {
+        let slot = block.content.header.content.slot;
         self.protocol_event_tx
             .send(ProtocolEvent::ReceivedBlock {
-                block_id,
                 block,
+                slot,
                 operation_set: Default::default(),
                 endorsement_ids: Default::default(),
             })
@@ -58,8 +58,8 @@ impl MockProtocolController {
             .expect("could not send protocol event");
     }
 
-    pub async fn receive_header(&mut self, header: BlockHeader) {
-        let block_id = header.compute_block_id().unwrap();
+    pub async fn receive_header(&mut self, header: WrappedHeader) {
+        let block_id = header.id;
         self.protocol_event_tx
             .send(ProtocolEvent::ReceivedBlockHeader { block_id, header })
             .await
@@ -73,7 +73,7 @@ impl MockProtocolController {
             .expect("could not send protocol event");
     }
 
-    // ignore all commands while waiting for a future
+    /// ignore all commands while waiting for a future
     pub async fn ignore_commands_while<FutureT: futures::Future + Unpin>(
         &mut self,
         mut future: FutureT,

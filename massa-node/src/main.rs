@@ -2,11 +2,16 @@
 
 #![feature(ip)]
 #![doc = include_str!("../../README.md")]
-
+#![warn(missing_docs)]
+#![warn(unused_crate_dependencies)]
 extern crate massa_logging;
 use crate::settings::{POOL_CONFIG, SETTINGS};
+
+use dialoguer::Password;
 use massa_api::{Private, Public, RpcServer, StopHandle, API};
+use massa_async_pool::AsyncPoolConfig;
 use massa_bootstrap::{get_state, start_bootstrap_server, BootstrapManager};
+use massa_cipher::{decrypt, encrypt};
 use massa_consensus_exports::{
     events::ConsensusEvent, settings::ConsensusChannels, ConsensusCommandSender, ConsensusConfig,
     ConsensusEventReceiver, ConsensusManager,
@@ -14,22 +19,30 @@ use massa_consensus_exports::{
 use massa_consensus_worker::start_consensus_controller;
 use massa_execution_exports::{ExecutionConfig, ExecutionManager};
 use massa_execution_worker::start_execution_worker;
-use massa_ledger::{FinalLedger, LedgerConfig};
+use massa_final_state::{FinalState, FinalStateConfig};
+use massa_ledger_exports::LedgerConfig;
+use massa_ledger_worker::FinalLedger;
 use massa_logging::massa_trace;
 use massa_models::{
     constants::{
-        END_TIMESTAMP, GENESIS_TIMESTAMP, MAX_GAS_PER_BLOCK, OPERATION_VALIDITY_PERIODS, T0,
-        THREAD_COUNT, VERSION,
+        END_TIMESTAMP, GENESIS_TIMESTAMP, MAX_ASYNC_GAS, MAX_ASYNC_POOL_LENGTH, MAX_GAS_PER_BLOCK,
+        OPERATION_VALIDITY_PERIODS, T0, THREAD_COUNT, VERSION,
     },
-    init_serialization_context, SerializationContext,
+    init_serialization_context,
+    prehash::Map,
+    Address, SerializationContext,
 };
-use massa_network::{start_network_controller, Establisher, NetworkCommandSender, NetworkManager};
+use massa_network_exports::{Establisher, NetworkCommandSender, NetworkManager};
+use massa_network_worker::start_network_controller;
 use massa_pool::{start_pool_controller, PoolCommandSender, PoolManager};
 use massa_protocol_exports::ProtocolManager;
 use massa_protocol_worker::start_protocol_controller;
+use massa_signature::KeyPair;
+use massa_storage::Storage;
 use massa_time::MassaTime;
 use parking_lot::RwLock;
-use std::{process, sync::Arc};
+use std::{path::Path, process, sync::Arc};
+use structopt::StructOpt;
 use tokio::signal;
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
@@ -38,7 +51,10 @@ use tracing_subscriber::filter::{filter_fn, LevelFilter};
 
 mod settings;
 
-async fn launch() -> (
+async fn launch(
+    password: &str,
+    staking_keys: &Map<Address, KeyPair>,
+) -> (
     PoolCommandSender,
     ConsensusEventReceiver,
     ConsensusCommandSender,
@@ -60,12 +76,47 @@ async fn launch() -> (
         }
     }
 
+    // Storage shared by multiple components.
+    let shared_storage: Storage = Default::default();
+
+    // init final state
+    let ledger_config = LedgerConfig {
+        initial_sce_ledger_path: SETTINGS.ledger.initial_sce_ledger_path.clone(),
+        disk_ledger_path: SETTINGS.ledger.disk_ledger_path.clone(),
+    };
+    let async_pool_config = AsyncPoolConfig {
+        max_length: MAX_ASYNC_POOL_LENGTH,
+    };
+    let final_state_config = FinalStateConfig {
+        final_history_length: SETTINGS.ledger.final_history_length,
+        thread_count: THREAD_COUNT,
+        ledger_config: ledger_config.clone(),
+        async_pool_config,
+    };
+
     // Init the global serialization context
     init_serialization_context(SerializationContext::default());
+
+    // Remove current disk ledger if there is one
+    // NOTE: this is temporary, since we cannot currently handle bootstrap from remaining ledger
+    if SETTINGS.ledger.disk_ledger_path.exists() {
+        std::fs::remove_dir_all(SETTINGS.ledger.disk_ledger_path.clone())
+            .expect("disk ledger delete failed");
+    }
+
+    // Create final ledger
+    let ledger = FinalLedger::new(ledger_config.clone()).expect("could not init final ledger");
+
+    // Create final state
+    let final_state = Arc::new(RwLock::new(
+        FinalState::new(final_state_config, Box::new(ledger)).expect("could not init final state"),
+    ));
 
     // interrupt signal listener
     let stop_signal = signal::ctrl_c();
     tokio::pin!(stop_signal);
+
+    // bootstrap
     let bootstrap_state = tokio::select! {
         _ = &mut stop_signal => {
             info!("interrupt signal received in bootstrap loop");
@@ -73,7 +124,8 @@ async fn launch() -> (
         },
         res = get_state(
             &SETTINGS.bootstrap,
-            massa_bootstrap::establisher::Establisher::new(),
+            final_state.clone(),
+            massa_bootstrap::types::Establisher::new(),
             *VERSION,
             *GENESIS_TIMESTAMP,
             *END_TIMESTAMP,
@@ -90,6 +142,7 @@ async fn launch() -> (
             Establisher::new(),
             bootstrap_state.compensation_millis,
             bootstrap_state.peers,
+            shared_storage.clone(),
             *VERSION,
         )
         .await
@@ -107,6 +160,7 @@ async fn launch() -> (
         MAX_GAS_PER_BLOCK,
         network_command_sender.clone(),
         network_event_receiver,
+        shared_storage.clone(),
     )
     .await
     .expect("could not start protocol controller");
@@ -116,20 +170,10 @@ async fn launch() -> (
         &POOL_CONFIG,
         protocol_command_sender.clone(),
         protocol_pool_event_receiver,
+        shared_storage.clone(),
     )
     .await
     .expect("could not start pool controller");
-
-    // init ledger
-    let ledger_config = LedgerConfig {
-        initial_sce_ledger_path: SETTINGS.ledger.initial_sce_ledger_path.clone(),
-        final_history_length: SETTINGS.ledger.final_history_length,
-        thread_count: THREAD_COUNT,
-    };
-    let final_ledger = Arc::new(RwLock::new(match bootstrap_state.final_ledger {
-        Some(l) => FinalLedger::from_bootstrap_state(ledger_config, l),
-        None => FinalLedger::new(ledger_config).expect("could not init final ledger"),
-    }));
 
     // launch execution module
     let execution_config = ExecutionConfig {
@@ -137,13 +181,18 @@ async fn launch() -> (
         readonly_queue_length: SETTINGS.execution.readonly_queue_length,
         cursor_delay: SETTINGS.execution.cursor_delay,
         clock_compensation: bootstrap_state.compensation_millis,
+        max_async_gas: MAX_ASYNC_GAS,
         thread_count: THREAD_COUNT,
         t0: T0,
         genesis_timestamp: *GENESIS_TIMESTAMP,
     };
-    let (execution_manager, execution_controller) =
-        start_execution_worker(execution_config, final_ledger.clone());
+    let (execution_manager, execution_controller) = start_execution_worker(
+        execution_config,
+        final_state.clone(),
+        shared_storage.clone(),
+    );
 
+    // init consensus configuration
     let consensus_config = ConsensusConfig::from(&SETTINGS.consensus);
     // launch consensus controller
     let (consensus_command_sender, consensus_event_receiver, consensus_manager) =
@@ -157,7 +206,10 @@ async fn launch() -> (
             },
             bootstrap_state.pos,
             bootstrap_state.graph,
+            shared_storage.clone(),
             bootstrap_state.compensation_millis,
+            password.to_string(),
+            staking_keys.to_owned(),
         )
         .await
         .expect("could not start consensus controller");
@@ -166,7 +218,7 @@ async fn launch() -> (
     let bootstrap_manager = start_bootstrap_server(
         consensus_command_sender.clone(),
         network_command_sender.clone(),
-        final_ledger.clone(),
+        final_state.clone(),
         &SETTINGS.bootstrap,
         massa_bootstrap::Establisher::new(),
         private_key,
@@ -281,12 +333,52 @@ async fn stop(
     // note that FinalLedger gets destroyed as soon as its Arc count goes to zero
 }
 
+#[derive(StructOpt)]
+struct Args {
+    /// Wallet password
+    #[structopt(short = "p", long = "pwd")]
+    password: Option<String>,
+}
+
+/// Ask for the staking keys file password and load them
+async fn load_or_create_staking_keys_file(
+    password: Option<String>,
+    path: &Path,
+) -> anyhow::Result<(String, Map<Address, KeyPair>)> {
+    if path.is_file() {
+        let password = password.unwrap_or_else(|| {
+            Password::new()
+                .with_prompt("Enter staking keys file password")
+                .interact()
+                .expect("IO error: Password reading failed, staking keys file couldn't be unlocked")
+        });
+        let (_version, decrypted_data) = decrypt(&password, &tokio::fs::read(path).await?)?;
+        let staking_keys: anyhow::Result<Map<Address, KeyPair>> = Ok(serde_json::from_slice::<
+            Map<Address, KeyPair>,
+        >(&decrypted_data)?);
+        Ok((password, staking_keys?))
+    } else {
+        let password = password.unwrap_or_else(|| {
+            Password::new()
+                .with_prompt("Enter new password for staking keys file")
+                .with_confirmation("Confirm password", "Passwords mismatching")
+                .interact()
+                .expect("IO error: Password reading failed, staking keys file couldn't be created")
+        });
+        let json = serde_json::to_string_pretty(&Map::<Address, KeyPair>::default())?;
+        let encrypted_data = encrypt(&password, json.as_bytes())?;
+        tokio::fs::write(path, encrypted_data).await?;
+        Ok((password, Map::default()))
+    }
+}
+
 /// To instrument `massa-node` with `tokio-console` run
 /// ```shell
 /// RUSTFLAGS="--cfg tokio_unstable" cargo run --bin massa-node --features instrument
 /// ```
+#[paw::main]
 #[tokio::main]
-async fn main() {
+async fn main(args: Args) -> anyhow::Result<()> {
     use tracing_subscriber::prelude::*;
     // spawn the console server in the background, returning a `Layer`:
     #[cfg(feature = "instrument")]
@@ -309,7 +401,20 @@ async fn main() {
         .with(tracing_layer)
         .init();
 
+    // Setup panic handlers,
+    // and when a panic occurs,
+    // run default handler,
+    // and then shutdown.
+    let default_panic = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        default_panic(info);
+        std::process::exit(1);
+    }));
+
     // run
+    let (password, staking_keys) =
+        load_or_create_staking_keys_file(args.password, &SETTINGS.consensus.staking_keys_path)
+            .await?;
     loop {
         let (
             _pool_command_sender,
@@ -325,7 +430,7 @@ async fn main() {
             mut api_private_stop_rx,
             api_private_handle,
             api_public_handle,
-        ) = launch().await;
+        ) = launch(&password, &staking_keys).await;
 
         // interrupt signal listener
         let stop_signal = signal::ctrl_c();
@@ -379,4 +484,5 @@ async fn main() {
             break;
         }
     }
+    Ok(())
 }

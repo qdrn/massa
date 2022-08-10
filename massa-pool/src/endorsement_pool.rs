@@ -2,10 +2,11 @@
 
 use crate::{settings::PoolConfig, PoolError};
 use massa_models::prehash::{Map, Set};
-use massa_models::{Address, BlockId, Endorsement, EndorsementContent, EndorsementId, Slot};
+use massa_models::wrapped::Wrapped;
+use massa_models::{Address, BlockId, Endorsement, EndorsementId, Slot, WrappedEndorsement};
 
 pub struct EndorsementPool {
-    endorsements: Map<EndorsementId, Endorsement>,
+    endorsements: Map<EndorsementId, WrappedEndorsement>,
     latest_final_periods: Vec<u64>,
     current_slot: Option<Slot>,
     cfg: &'static PoolConfig,
@@ -29,8 +30,8 @@ impl EndorsementPool {
     pub fn update_latest_final_periods(&mut self, periods: Vec<u64>) {
         self.endorsements.retain(
             |_,
-             Endorsement {
-                 content: EndorsementContent { slot, .. },
+             Wrapped {
+                 content: Endorsement { slot, .. },
                  ..
              }| slot.period >= periods[slot.thread as usize],
         );
@@ -38,30 +39,30 @@ impl EndorsementPool {
     }
 
     /// gets ok endorsements for a given slot, with given endorsed block and endorsement creators at index
-    /// returns sorted and dedupped endorsements
+    /// returns sorted and deduped endorsements
     pub fn get_endorsements(
         &self,
         target_slot: Slot,
         parent: BlockId,
         creators: Vec<Address>,
-    ) -> Result<Vec<(EndorsementId, Endorsement)>, PoolError> {
+    ) -> Result<Vec<WrappedEndorsement>, PoolError> {
         let mut candidates = self
             .endorsements
             .iter()
-            .filter_map(|(endo_id, endorsement)| {
-                let creator = Address::from_public_key(&endorsement.content.sender_public_key);
+            .filter_map(|(_endo_id, endorsement)| {
+                let creator = &endorsement.creator_address;
                 if endorsement.content.endorsed_block == parent
                     && endorsement.content.slot == target_slot
-                    && creators.get(endorsement.content.index as usize) == Some(&creator)
+                    && creators.get(endorsement.content.index as usize) == Some(creator)
                 {
-                    Some(Ok((*endo_id, endorsement.clone())))
+                    Some(Ok(endorsement.clone()))
                 } else {
                     None
                 }
             })
-            .collect::<Result<Vec<(EndorsementId, Endorsement)>, PoolError>>()?;
-        candidates.sort_unstable_by_key(|(_e_id, endo)| endo.content.index);
-        candidates.dedup_by_key(|(_e_id, endo)| endo.content.index);
+            .collect::<Result<Vec<WrappedEndorsement>, PoolError>>()?;
+        candidates.sort_unstable_by_key(|endo| endo.content.index);
+        candidates.dedup_by_key(|endo| endo.content.index);
         Ok(candidates)
     }
 
@@ -69,7 +70,7 @@ impl EndorsementPool {
     /// Prunes the pool if there are too many endorsements
     pub fn add_endorsements(
         &mut self,
-        endorsements: Map<EndorsementId, Endorsement>,
+        endorsements: Map<EndorsementId, WrappedEndorsement>,
     ) -> Result<Set<EndorsementId>, PoolError> {
         let mut newly_added = Set::<EndorsementId>::default();
         for (endorsement_id, endorsement) in endorsements.into_iter() {
@@ -149,10 +150,10 @@ impl EndorsementPool {
     pub fn get_endorsement_by_address(
         &self,
         address: Address,
-    ) -> Result<Map<EndorsementId, Endorsement>, PoolError> {
+    ) -> Result<Map<EndorsementId, WrappedEndorsement>, PoolError> {
         let mut res = Map::default();
         for (id, ed) in self.endorsements.iter() {
-            if Address::from_public_key(&ed.content.sender_public_key) == address {
+            if ed.creator_address == address {
                 res.insert(*id, ed.clone());
             }
         }
@@ -162,7 +163,7 @@ impl EndorsementPool {
     pub fn get_endorsement_by_id(
         &self,
         endorsements: Set<EndorsementId>,
-    ) -> Map<EndorsementId, Endorsement> {
+    ) -> Map<EndorsementId, WrappedEndorsement> {
         self.endorsements
             .iter()
             .filter_map(|(id, ed)| {

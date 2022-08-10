@@ -5,32 +5,41 @@ use crate::{
     ProtocolEvent, ProtocolEventReceiver, ProtocolPoolEvent, ProtocolPoolEventReceiver,
     ProtocolSettings,
 };
-use massa_hash::hash::Hash;
+use massa_hash::Hash;
 use massa_models::node::NodeId;
+use massa_models::operation::OperationSerializer;
+use massa_models::wrapped::WrappedContent;
 use massa_models::{
-    Address, Amount, Block, BlockHeader, BlockHeaderContent, BlockId, SerializeCompact, Slot,
+    Address, Amount, Block, BlockHeader, BlockId, BlockSerializer, Slot, WrappedBlock,
+    WrappedEndorsement, WrappedOperation,
 };
-use massa_models::{Endorsement, EndorsementContent, Operation, OperationContent, OperationType};
-use massa_network::NetworkCommand;
-use massa_signature::{
-    derive_public_key, generate_random_private_key, sign, PrivateKey, PublicKey,
+use massa_models::{
+    BlockHeaderSerializer, Endorsement, EndorsementSerializer, Operation, OperationType,
 };
+use massa_network_exports::NetworkCommand;
+use massa_signature::KeyPair;
 use massa_time::MassaTime;
 use std::collections::HashMap;
 use tokio::time::sleep;
 
+/// test utility structures
+/// keeps keypair and associated node id
 #[derive(Debug, Clone)]
 pub struct NodeInfo {
-    pub private_key: PrivateKey,
+    /// key pair of the node
+    pub keypair: KeyPair,
+    /// node id
     pub id: NodeId,
 }
 
+/// create node info
 pub fn create_node() -> NodeInfo {
-    let private_key = generate_random_private_key();
-    let id = NodeId(derive_public_key(&private_key));
-    NodeInfo { private_key, id }
+    let keypair = KeyPair::generate();
+    let id = NodeId(keypair.get_public_key());
+    NodeInfo { keypair, id }
 }
 
+/// create number of nodes and connect them with protocol
 pub async fn create_and_connect_nodes(
     num: usize,
     network_controller: &mut MockNetworkController,
@@ -48,11 +57,9 @@ pub async fn create_and_connect_nodes(
 /// Creates a block for use in protocol,
 /// without paying attention to consensus related things
 /// like slot, parents, and merkle root.
-pub fn create_block(private_key: &PrivateKey, public_key: &PublicKey) -> Block {
-    let (_, header) = BlockHeader::new_signed(
-        private_key,
-        BlockHeaderContent {
-            creator: *public_key,
+pub fn create_block(keypair: &KeyPair) -> WrappedBlock {
+    let header = BlockHeader::new_wrapped(
+        BlockHeader {
             slot: Slot::new(1, 0),
             parents: vec![
                 BlockId(Hash::compute_from("Genesis 0".as_bytes())),
@@ -61,30 +68,39 @@ pub fn create_block(private_key: &PrivateKey, public_key: &PublicKey) -> Block {
             operation_merkle_root: Hash::compute_from(&Vec::new()),
             endorsements: Vec::new(),
         },
+        BlockHeaderSerializer::new(),
+        keypair,
     )
     .unwrap();
 
-    Block {
-        header,
-        operations: Vec::new(),
-    }
+    Block::new_wrapped(
+        Block {
+            header,
+            operations: Vec::new(),
+        },
+        BlockSerializer::new(),
+        keypair,
+    )
+    .unwrap()
 }
 
+/// create a block with no endorsement
+///
+/// * `keypair`: key that sign the block
+/// * `slot`
+/// * `operations`
 pub fn create_block_with_operations(
-    private_key: &PrivateKey,
-    public_key: &PublicKey,
+    keypair: &KeyPair,
     slot: Slot,
-    operations: Vec<Operation>,
-) -> Block {
+    operations: Vec<WrappedOperation>,
+) -> WrappedBlock {
     let operation_merkle_root = Hash::compute_from(
         &operations.iter().fold(Vec::new(), |acc, v| {
-            [acc, v.get_operation_id().unwrap().to_bytes().to_vec()].concat()
+            [acc, v.id.to_bytes().to_vec()].concat()
         })[..],
     );
-    let (_, header) = BlockHeader::new_signed(
-        private_key,
-        BlockHeaderContent {
-            creator: *public_key,
+    let header = BlockHeader::new_wrapped(
+        BlockHeader {
             slot,
             parents: vec![
                 BlockId(Hash::compute_from("Genesis 0".as_bytes())),
@@ -93,22 +109,31 @@ pub fn create_block_with_operations(
             operation_merkle_root,
             endorsements: Vec::new(),
         },
+        BlockHeaderSerializer::new(),
+        keypair,
     )
     .unwrap();
 
-    Block { header, operations }
+    Block::new_wrapped(
+        Block { header, operations },
+        BlockSerializer::new(),
+        keypair,
+    )
+    .unwrap()
 }
 
+/// create a block with no operation
+///
+/// * `keypair`: key that sign the block
+/// * `slot`
+/// * `endorsements`
 pub fn create_block_with_endorsements(
-    private_key: &PrivateKey,
-    public_key: &PublicKey,
+    keypair: &KeyPair,
     slot: Slot,
-    endorsements: Vec<Endorsement>,
-) -> Block {
-    let (_, header) = BlockHeader::new_signed(
-        private_key,
-        BlockHeaderContent {
-            creator: *public_key,
+    endorsements: Vec<WrappedEndorsement>,
+) -> WrappedBlock {
+    let header = BlockHeader::new_wrapped(
+        BlockHeader {
             slot,
             parents: vec![
                 BlockId(Hash::compute_from("Genesis 0".as_bytes())),
@@ -117,23 +142,31 @@ pub fn create_block_with_endorsements(
             operation_merkle_root: Hash::compute_from(&Vec::new()),
             endorsements,
         },
+        BlockHeaderSerializer::new(),
+        keypair,
     )
     .unwrap();
 
-    Block {
-        header,
-        operations: Default::default(),
-    }
+    Block::new_wrapped(
+        Block {
+            header,
+            operations: Default::default(),
+        },
+        BlockSerializer::new(),
+        keypair,
+    )
+    .unwrap()
 }
 
+/// send a block and assert it has been propagate (or not)
 pub async fn send_and_propagate_block(
     network_controller: &mut MockNetworkController,
-    block: Block,
+    block: WrappedBlock,
     valid: bool,
     source_node_id: NodeId,
     protocol_event_receiver: &mut ProtocolEventReceiver,
 ) {
-    let expected_hash = block.header.compute_block_id().unwrap();
+    let expected_hash = block.id;
 
     // Send block to protocol.
     network_controller.send_block(source_node_id, block).await;
@@ -145,15 +178,12 @@ pub async fn send_and_propagate_block(
     })
     .await
     {
-        Some(ProtocolEvent::ReceivedBlock { block_id, .. }) => Some(block_id),
+        Some(ProtocolEvent::ReceivedBlock { block, .. }) => Some(block.id),
         None => None,
         _ => panic!("Unexpected or no protocol event."),
     };
     if valid {
-        assert_eq!(
-            expected_hash,
-            hash.expect("block not propagated before timeout")
-        );
+        assert_eq!(expected_hash, hash.unwrap());
     } else {
         assert!(hash.is_none(), "unexpected protocol event")
     }
@@ -161,52 +191,42 @@ pub async fn send_and_propagate_block(
 
 /// Creates an endorsement for use in protocol tests,
 /// without paying attention to consensus related things.
-pub fn create_endorsement() -> Endorsement {
-    let sender_priv = generate_random_private_key();
-    let sender_public_key = derive_public_key(&sender_priv);
+pub fn create_endorsement() -> WrappedEndorsement {
+    let keypair = KeyPair::generate();
 
-    let content = EndorsementContent {
-        sender_public_key,
+    let content = Endorsement {
         slot: Slot::new(10, 1),
         index: 0,
         endorsed_block: BlockId(Hash::compute_from(&[])),
     };
-    let hash = Hash::compute_from(&content.to_bytes_compact().unwrap());
-    let signature = sign(&hash, &sender_priv).unwrap();
-    Endorsement { content, signature }
+    Endorsement::new_wrapped(content, EndorsementSerializer::new(), &keypair).unwrap()
 }
 
-// Create an operation, from a specific sender, and with a specific expire period.
+/// Create an operation, from a specific sender, and with a specific expire period.
 pub fn create_operation_with_expire_period(
-    sender_priv: &PrivateKey,
+    keypair: &KeyPair,
     expire_period: u64,
-) -> Operation {
-    let sender_pub = derive_public_key(sender_priv);
-
-    let recv_priv = generate_random_private_key();
-    let recv_pub = derive_public_key(&recv_priv);
+) -> WrappedOperation {
+    let recv_keypair = KeyPair::generate();
 
     let op = OperationType::Transaction {
-        recipient_address: Address::from_public_key(&recv_pub),
+        recipient_address: Address::from_public_key(&recv_keypair.get_public_key()),
         amount: Amount::default(),
     };
-    let content = OperationContent {
+    let content = Operation {
         fee: Amount::default(),
         op,
-        sender_public_key: sender_pub,
         expire_period,
     };
-    let hash = Hash::compute_from(&content.to_bytes_compact().unwrap());
-    let signature = sign(&hash, sender_priv).unwrap();
-
-    Operation { content, signature }
+    Operation::new_wrapped(content, OperationSerializer::new(), keypair).unwrap()
 }
 
 lazy_static::lazy_static! {
+    /// protocol settings
     pub static ref PROTOCOL_SETTINGS: ProtocolSettings = create_protocol_settings();
 }
 
-// create a ProtocolConfig with typical values
+/// create a `ProtocolConfig` with typical values
 pub fn create_protocol_settings() -> ProtocolSettings {
     // Init the serialization context with a default,
     // can be overwritten with a more specific one in the test.
@@ -231,15 +251,23 @@ pub fn create_protocol_settings() -> ProtocolSettings {
 
     ProtocolSettings {
         ask_block_timeout: 500.into(),
+        max_known_blocks_size: 100,
         max_node_known_blocks_size: 100,
         max_node_wanted_blocks_size: 100,
         max_simultaneous_ask_blocks_per_node: 10,
         max_send_wait: MassaTime::from(100),
         max_known_ops_size: 1000,
+        max_node_known_ops_size: 1000,
         max_known_endorsements_size: 1000,
+        max_node_known_endorsements_size: 1000,
+        operation_batch_buffer_capacity: 1000,
+        operation_batch_proc_period: 200.into(),
+        asked_operations_pruning_period: 500.into(),
+        max_operations_per_message: 1024,
     }
 }
 
+/// wait protocol event
 pub async fn wait_protocol_event<F>(
     protocol_event_receiver: &mut ProtocolEventReceiver,
     timeout: MassaTime,
@@ -261,6 +289,7 @@ where
     }
 }
 
+/// wait protocol pool event
 pub async fn wait_protocol_pool_event<F>(
     protocol_event_receiver: &mut ProtocolPoolEventReceiver,
     timeout: MassaTime,
@@ -282,6 +311,7 @@ where
     }
 }
 
+/// assert block id has been asked to node
 pub async fn assert_hash_asked_to_node(
     hash_1: BlockId,
     node_id: NodeId,
@@ -299,6 +329,7 @@ pub async fn assert_hash_asked_to_node(
     assert!(list.get(&node_id).unwrap().contains(&hash_1));
 }
 
+/// retrieve what blocks where asked to which nodes
 pub async fn asked_list(
     network_controller: &mut MockNetworkController,
 ) -> HashMap<NodeId, Vec<BlockId>> {
@@ -312,17 +343,7 @@ pub async fn asked_list(
         .expect("Hash not asked for before timer.")
 }
 
-pub async fn assert_banned_node(node_id: NodeId, network_controller: &mut MockNetworkController) {
-    let banned_node = network_controller
-        .wait_command(1000.into(), |cmd| match cmd {
-            NetworkCommand::Ban(node) => Some(node),
-            _ => None,
-        })
-        .await
-        .expect("Node not banned before timeout.");
-    assert_eq!(banned_node, node_id);
-}
-
+/// assert a list of node(s) has been banned
 pub async fn assert_banned_nodes(
     mut nodes: Vec<NodeId>,
     network_controller: &mut MockNetworkController,
@@ -332,13 +353,13 @@ pub async fn assert_banned_nodes(
     loop {
         tokio::select! {
             msg = network_controller
-                   .wait_command(1000.into(), |cmd| match cmd {
-                       NetworkCommand::Ban(node) => Some(node),
+                   .wait_command(2000.into(), |cmd| match cmd {
+                       NetworkCommand::NodeBanByIds(node) => Some(node),
                        _ => None,
                    })
              =>  {
-                 let banned_node = msg.expect("Nodes not banned before timeout.");
-                 nodes.drain_filter(|id| *id == banned_node);
+                 let banned_nodes = msg.expect("Nodes not banned before timeout.");
+                 nodes.drain_filter(|id| banned_nodes.contains(id));
                  if nodes.is_empty() {
                      break;
                  }

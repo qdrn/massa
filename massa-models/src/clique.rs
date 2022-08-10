@@ -12,11 +12,26 @@ use crate::{
     DeserializeVarInt, ModelsError, SerializeCompact, SerializeVarInt,
 };
 
+/// Mutually compatible blocks in the graph
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Clique {
+    /// the block ids of the blocks in that clique
     pub block_ids: Set<BlockId>,
+    /// Fitness used to compute finality
+    /// Depends on descendants and endorsement count
     pub fitness: u64,
+    /// True if it is the clique of higher fitness
     pub is_blockclique: bool,
+}
+
+impl Default for Clique {
+    fn default() -> Self {
+        Clique {
+            block_ids: Default::default(),
+            fitness: 0,
+            is_blockclique: true,
+        }
+    }
 }
 
 impl SerializeCompact for Clique {
@@ -24,7 +39,7 @@ impl SerializeCompact for Clique {
     /// ```rust
     /// use massa_models::clique::Clique;
     /// # use massa_models::{SerializeCompact, DeserializeCompact, SerializationContext, BlockId};
-    /// # use massa_hash::hash::Hash;
+    /// # use massa_hash::Hash;
     /// # use std::str::FromStr;
     /// # massa_models::init_serialization_context(massa_models::SerializationContext::default());
     /// # pub fn get_dummy_block_id(s: &str) -> BlockId {
@@ -53,7 +68,7 @@ impl SerializeCompact for Clique {
         })?;
         res.extend(&block_ids_count.to_varint_bytes());
         for b_id in self.block_ids.iter() {
-            res.extend(&b_id.to_bytes());
+            res.extend(b_id.to_bytes());
         }
 
         // fitness
@@ -87,7 +102,7 @@ impl DeserializeCompact for Clique {
         let mut block_ids =
             Set::<BlockId>::with_capacity_and_hasher(block_count as usize, BuildMap::default());
         for _ in 0..block_count {
-            let b_id = BlockId::from_bytes(&array_from_slice(&buffer[cursor..])?)?;
+            let b_id = BlockId::from_bytes(&array_from_slice(&buffer[cursor..])?);
             cursor += BLOCK_ID_SIZE_BYTES;
             block_ids.insert(b_id);
         }

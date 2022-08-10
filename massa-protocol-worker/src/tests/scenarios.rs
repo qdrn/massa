@@ -5,11 +5,11 @@
 use super::tools::protocol_test;
 use massa_models::prehash::{Map, Set};
 use massa_models::BlockId;
-use massa_network::NetworkCommand;
+use massa_network_exports::NetworkCommand;
 use massa_protocol_exports::tests::tools;
 use massa_protocol_exports::{
     tests::tools::{create_and_connect_nodes, create_block, wait_protocol_event},
-    ProtocolEvent,
+    BlocksResults, ProtocolEvent,
 };
 use serial_test::serial;
 use std::collections::HashSet;
@@ -38,11 +38,11 @@ async fn test_protocol_asks_for_block_from_node_who_propagated_header() {
             network_controller.close_connection(nodes[0].id).await;
 
             // 2. Create a block coming from node creator_node.
-            let block = create_block(&creator_node.private_key, &creator_node.id.0);
+            let block = create_block(&creator_node.keypair);
 
             // 3. Send header to protocol.
             network_controller
-                .send_header(creator_node.id, block.header.clone())
+                .send_header(creator_node.id, block.content.header.clone())
                 .await;
 
             // Check protocol sends header to consensus.
@@ -61,7 +61,7 @@ async fn test_protocol_asks_for_block_from_node_who_propagated_header() {
             };
 
             // 4. Check that protocol sent the right header to consensus.
-            let expected_hash = block.header.compute_block_id().unwrap();
+            let expected_hash = block.id;
             assert_eq!(expected_hash, received_hash);
 
             // 5. Ask for block.
@@ -131,9 +131,9 @@ async fn test_protocol_sends_blocks_when_asked_for() {
             network_controller.close_connection(nodes[2].id).await;
 
             // 2. Create a block coming from creator_node.
-            let block = create_block(&creator_node.private_key, &creator_node.id.0);
+            let block = create_block(&creator_node.keypair);
 
-            let expected_hash = block.header.compute_block_id().unwrap();
+            let expected_hash = block.id;
 
             // 3. Simulate two nodes asking for a block.
             for node in nodes.iter().take(2) {
@@ -162,8 +162,8 @@ async fn test_protocol_sends_blocks_when_asked_for() {
             }
 
             // 4. Simulate consensus sending block.
-            let mut results = Map::default();
-            results.insert(expected_hash, Some((block, None, None)));
+            let mut results: BlocksResults = Map::default();
+            results.insert(expected_hash, Some((None, None)));
             protocol_command_sender
                 .send_get_blocks_results(results)
                 .await
@@ -178,9 +178,8 @@ async fn test_protocol_sends_blocks_when_asked_for() {
                     .wait_command(1000.into(), send_block_or_header_cmd_filter)
                     .await
                 {
-                    Some(NetworkCommand::SendBlock { node, block }) => {
-                        let hash = block.header.compute_block_id().unwrap();
-                        assert_eq!(expected_hash, hash);
+                    Some(NetworkCommand::SendBlock { node, block_id }) => {
+                        assert_eq!(block_id, expected_hash);
                         assert!(expecting_block.remove(&node));
                     }
                     Some(NetworkCommand::SendBlockHeader { .. }) => {
@@ -241,11 +240,11 @@ async fn test_protocol_propagates_block_to_node_who_asked_for_it_and_only_header
             network_controller.close_connection(node_d.id).await;
 
             // 2. Create a block coming from one node.
-            let ref_block = create_block(&creator_node.private_key, &creator_node.id.0);
+            let ref_block = create_block(&creator_node.keypair);
 
             // 3. Send header to protocol.
             network_controller
-                .send_header(creator_node.id, ref_block.header.clone())
+                .send_header(creator_node.id, ref_block.content.header.clone())
                 .await;
 
             // node[1] asks for that block
@@ -283,19 +282,21 @@ async fn test_protocol_propagates_block_to_node_who_asked_for_it_and_only_header
 
             // 5. Propagate header.
             let op_ids = ref_block
+                .content
                 .operations
                 .iter()
-                .map(|op| op.get_operation_id().unwrap())
+                .map(|op| op.id)
                 .collect();
             let endo_ids = ref_block
+                .content
                 .header
                 .content
                 .endorsements
                 .iter()
-                .map(|endo| endo.compute_endorsement_id().unwrap())
+                .map(|endo| endo.id)
                 .collect();
             protocol_command_sender
-                .integrated_block(ref_hash, ref_block, op_ids, endo_ids)
+                .integrated_block(ref_hash, op_ids, endo_ids)
                 .await
                 .expect("Failed to ask for block.");
 
@@ -319,15 +320,13 @@ async fn test_protocol_propagates_block_to_node_who_asked_for_it_and_only_header
                     })
                     .await
                 {
-                    Some(NetworkCommand::SendBlockHeader { node, header }) => {
+                    Some(NetworkCommand::SendBlockHeader { node, block_id }) => {
                         assert!(expected_headers.remove(&node));
-                        let sent_header_hash = header.compute_block_id().unwrap();
-                        assert_eq!(sent_header_hash, ref_hash);
+                        assert_eq!(block_id, ref_hash);
                     }
-                    Some(NetworkCommand::SendBlock { node, block }) => {
+                    Some(NetworkCommand::SendBlock { node, block_id }) => {
                         assert!(expected_full_blocks.remove(&node));
-                        let sent_header_hash = block.header.compute_block_id().unwrap();
-                        assert_eq!(sent_header_hash, ref_hash);
+                        assert_eq!(block_id, ref_hash);
                     }
                     _ => panic!("Unexpected or no network command."),
                 };
@@ -366,29 +365,30 @@ async fn test_protocol_sends_full_blocks_it_receives_to_consensus() {
             let creator_node = nodes.pop().expect("Failed to get node info.");
 
             // 1. Create a block coming from one node.
-            let block = create_block(&creator_node.private_key, &creator_node.id.0);
+            let block = create_block(&creator_node.keypair);
 
-            let expected_hash = block.header.compute_block_id().unwrap();
+            let expected_hash = block.id;
 
             // 3. Send block to protocol.
-            network_controller.send_block(creator_node.id, block).await;
+            network_controller
+                .send_block(creator_node.id, block.clone())
+                .await;
 
             // Check protocol sends block to consensus.
-            let hash =
-                match wait_protocol_event(
-                    &mut protocol_event_receiver,
-                    1000.into(),
-                    |evt| match evt {
-                        evt @ ProtocolEvent::ReceivedBlock { .. } => Some(evt),
-                        _ => None,
-                    },
-                )
-                .await
-                {
-                    Some(ProtocolEvent::ReceivedBlock { block_id, .. }) => block_id,
-                    _ => panic!("Unexpected or no protocol event."),
-                };
-            assert_eq!(expected_hash, hash);
+            let block_id = match wait_protocol_event(
+                &mut protocol_event_receiver,
+                1000.into(),
+                |evt| match evt {
+                    evt @ ProtocolEvent::ReceivedBlock { .. } => Some(evt),
+                    _ => None,
+                },
+            )
+            .await
+            {
+                Some(ProtocolEvent::ReceivedBlock { block, .. }) => block.id,
+                _ => panic!("Unexpected or no protocol event."),
+            };
+            assert_eq!(expected_hash, block_id);
 
             (
                 network_controller,
@@ -419,9 +419,9 @@ async fn test_protocol_block_not_found() {
             let creator_node = nodes.pop().expect("Failed to get node info.");
 
             // 1. Create a block coming from one node.
-            let block = create_block(&creator_node.private_key, &creator_node.id.0);
+            let block = create_block(&creator_node.keypair);
 
-            let expected_hash = block.header.compute_block_id().unwrap();
+            let expected_hash = block.id;
 
             // 3. Ask block to protocol.
             network_controller

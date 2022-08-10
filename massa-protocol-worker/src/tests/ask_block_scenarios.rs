@@ -3,7 +3,7 @@
 use super::tools::protocol_test;
 use massa_models::prehash::Set;
 use massa_models::BlockId;
-use massa_network::NetworkCommand;
+use massa_network_exports::NetworkCommand;
 use massa_protocol_exports::tests::tools;
 use massa_protocol_exports::tests::tools::{asked_list, assert_hash_asked_to_node};
 use massa_protocol_exports::ProtocolEvent;
@@ -36,8 +36,8 @@ async fn test_without_a_priori() {
                 .unwrap();
 
             // 2. Create a block coming from node 0.
-            let block = tools::create_block(&node_a.private_key, &node_a.id.0);
-            let hash_1 = block.header.compute_block_id().unwrap();
+            let block = tools::create_block(&node_a.keypair);
+            let hash_1 = block.id;
             // end set up
 
             // send wishlist
@@ -108,13 +108,13 @@ async fn test_someone_knows_it() {
                 .unwrap();
 
             // 2. Create a block coming from node 0.
-            let block = tools::create_block(&node_a.private_key, &node_a.id.0);
-            let hash_1 = block.header.compute_block_id().unwrap();
+            let block = tools::create_block(&node_a.keypair);
+            let hash_1 = block.id;
             // end set up
 
             // node c must know about block
             network_controller
-                .send_header(node_c.id, block.header.clone())
+                .send_header(node_c.id, block.content.header.clone())
                 .await;
 
             match protocol_event_receiver.wait_event().await.unwrap() {
@@ -188,8 +188,8 @@ async fn test_dont_want_it_anymore() {
                 .unwrap();
 
             // 2. Create a block coming from node 0.
-            let block = tools::create_block(&node_a.private_key, &node_a.id.0);
-            let hash_1 = block.header.compute_block_id().unwrap();
+            let block = tools::create_block(&node_a.keypair);
+            let hash_1 = block.id;
             // end set up
 
             // send wishlist
@@ -266,8 +266,8 @@ async fn test_no_one_has_it() {
                 .unwrap();
 
             // 2. Create a block coming from node 0.
-            let block = tools::create_block(&node_a.private_key, &node_a.id.0);
-            let hash_1 = block.header.compute_block_id().unwrap();
+            let block = tools::create_block(&node_a.keypair);
+            let hash_1 = block.id;
             // end set up
 
             // send wishlist
@@ -345,15 +345,16 @@ async fn test_multiple_blocks_without_a_priori() {
                 .unwrap();
 
             // 2. Create two blocks coming from node 0.
-            let block_1 = tools::create_block(&node_a.private_key, &node_a.id.0);
-            let hash_1 = block_1.header.compute_block_id().unwrap();
+            let block_1 = tools::create_block(&node_a.keypair);
+            let hash_1 = block_1.id;
 
-            let block_2 = tools::create_block(&node_a.private_key, &node_a.id.0);
-            let hash_2 = block_2.header.compute_block_id().unwrap();
+            let block_2 = tools::create_block(&node_a.keypair);
+            let hash_2 = block_2.id;
 
             // node a is disconnected so no node knows about wanted blocks
             network_controller.close_connection(node_a.id).await;
             // end set up
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
             // send wishlist
             protocol_command_sender

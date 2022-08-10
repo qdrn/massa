@@ -1,7 +1,13 @@
 // Copyright (c) 2022 MASSA LABS <info@massa.net>
+//! Signature management
 
-pub mod signature_impl;
+#![warn(missing_docs)]
+#![warn(unused_crate_dependencies)]
+mod error;
+mod signature_impl;
+
+pub use error::MassaSignatureError;
 pub use signature_impl::{
-    derive_public_key, generate_random_private_key, sign, verify_signature, PrivateKey, PublicKey,
-    Signature, PRIVATE_KEY_SIZE_BYTES, PUBLIC_KEY_SIZE_BYTES, SIGNATURE_SIZE_BYTES,
+    KeyPair, PublicKey, PublicKeyDeserializer, Signature, SignatureDeserializer,
+    PUBLIC_KEY_SIZE_BYTES, SIGNATURE_SIZE_BYTES,
 };

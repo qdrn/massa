@@ -1,11 +1,12 @@
 // Copyright (c) 2022 MASSA LABS <info@massa.net>
 
-use crate::messages::BootstrapMessage;
+use crate::messages::{BootstrapClientMessage, BootstrapServerMessage};
 use displaydoc::Display;
 use massa_consensus_exports::error::ConsensusError;
+use massa_final_state::FinalStateError;
 use massa_hash::MassaHashError;
-use massa_ledger::LedgerError;
-use massa_network::NetworkError;
+use massa_network_exports::NetworkError;
+use massa_serialization::SerializeError;
 use massa_time::TimeError;
 use thiserror::Error;
 
@@ -18,24 +19,32 @@ pub enum BootstrapError {
     GeneralError(String),
     /// models error: {0}
     ModelsError(#[from] massa_models::ModelsError),
-    /// unexpected message from bootstrap node: {0:?}
-    UnexpectedMessage(BootstrapMessage),
+    /// serialize error: {0}
+    SerializeError(#[from] SerializeError),
+    /// unexpected message received from server: {0:?}
+    UnexpectedServerMessage(BootstrapServerMessage),
+    /// unexpected message received from client: {0:?}
+    UnexpectedClientMessage(BootstrapClientMessage),
     /// connection with bootstrap node dropped
     UnexpectedConnectionDrop,
-    /// massa_hash error: {0}
+    /// `massa_hash` error: {0}
     MassaHashError(#[from] MassaHashError),
+    /// massa_signature error {0}
+    MassaSignatureError(#[from] massa_signature::MassaSignatureError),
     /// time error: {0}
     TimeError(#[from] TimeError),
     /// consensus error: {0}
     ConsensusError(#[from] ConsensusError),
     /// network error: {0}
     NetworkError(#[from] NetworkError),
-    /// ledger error: {0}
-    LedgerError(#[from] LedgerError),
+    /// final state error: {0}
+    FinalStateError(#[from] FinalStateError),
     /// join error: {0}
     JoinError(#[from] tokio::task::JoinError),
-    /// missing private key file
+    /// missing keypair file
     MissingKeyError,
     /// incompatible version: {0}
     IncompatibleVersionError(String),
+    /// Received error: {0}
+    ReceivedError(String),
 }

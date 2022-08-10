@@ -3,8 +3,8 @@
 use super::{
     mock_establisher,
     tools::{
-        bridge_mock_streams, get_boot_state, get_keys, get_peers,
-        get_random_ledger_bootstrap_state, wait_consensus_command, wait_network_command,
+        bridge_mock_streams, get_boot_state, get_peers, get_random_final_state_bootstrap,
+        wait_consensus_command, wait_network_command,
     },
 };
 use crate::BootstrapSettings;
@@ -15,10 +15,10 @@ use crate::{
     },
 };
 use massa_consensus_exports::{commands::ConsensusCommand, ConsensusCommandSender};
-use massa_ledger::{test_exports::assert_eq_ledger_bootstrap_state, FinalLedger};
+use massa_final_state::{test_exports::assert_eq_final_state, FinalState};
 use massa_models::Version;
-use massa_network::{NetworkCommand, NetworkCommandSender};
-use massa_signature::PrivateKey;
+use massa_network_exports::{NetworkCommand, NetworkCommandSender};
+use massa_signature::KeyPair;
 use massa_time::MassaTime;
 use parking_lot::RwLock;
 use serial_test::serial;
@@ -26,34 +26,30 @@ use std::{str::FromStr, sync::Arc};
 use tokio::sync::mpsc;
 
 lazy_static::lazy_static! {
-    pub static ref BOOTSTRAP_SETTINGS_PRIVATE_KEY: (BootstrapSettings, PrivateKey) = {
-        let (private_key, public_key) = get_keys();
-        (get_bootstrap_config(public_key), private_key)
+    pub static ref BOOTSTRAP_SETTINGS_KEYPAIR: (BootstrapSettings, KeyPair) = {
+        let keypair = KeyPair::generate();
+        (get_bootstrap_config(keypair.get_public_key()), keypair)
     };
 }
 
 #[tokio::test]
 #[serial]
 async fn test_bootstrap_server() {
-    let (bootstrap_settings, private_key): &(BootstrapSettings, PrivateKey) =
-        &BOOTSTRAP_SETTINGS_PRIVATE_KEY;
+    let (bootstrap_settings, keypair): &(BootstrapSettings, KeyPair) = &BOOTSTRAP_SETTINGS_KEYPAIR;
 
     let (consensus_cmd_tx, mut consensus_cmd_rx) = mpsc::channel::<ConsensusCommand>(5);
     let (network_cmd_tx, mut network_cmd_rx) = mpsc::channel::<NetworkCommand>(5);
-    let ledger_bootstrap_state = get_random_ledger_bootstrap_state(2);
-    let final_ledger = Arc::new(RwLock::new(FinalLedger::from_bootstrap_state(
-        Default::default(),
-        ledger_bootstrap_state.clone(),
-    )));
+    let final_state_bootstrap = get_random_final_state_bootstrap(2);
+    let final_state = Arc::new(RwLock::new(final_state_bootstrap));
 
     let (bootstrap_establisher, bootstrap_interface) = mock_establisher::new();
     let bootstrap_manager = start_bootstrap_server(
         ConsensusCommandSender(consensus_cmd_tx),
         NetworkCommandSender(network_cmd_tx),
-        final_ledger,
+        final_state.clone(),
         bootstrap_settings,
         bootstrap_establisher,
-        *private_key,
+        keypair.clone(),
         0,
         Version::from_str("TEST.1.2").unwrap(),
     )
@@ -61,11 +57,15 @@ async fn test_bootstrap_server() {
     .unwrap()
     .unwrap();
 
+    let final_state_client = Arc::new(RwLock::new(FinalState::default()));
+    let final_state_client_thread = final_state_client.clone();
+
     // launch the get_state process
     let (remote_establisher, mut remote_interface) = mock_establisher::new();
     let get_state_h = tokio::spawn(async move {
         get_state(
             bootstrap_settings,
+            final_state_client_thread,
             remote_establisher,
             Version::from_str("TEST.1.2").unwrap(),
             MassaTime::now().unwrap().saturating_sub(1000.into()),
@@ -160,11 +160,8 @@ async fn test_bootstrap_server() {
         "mismatch between sent and received peers"
     );
 
-    // check ledger
-    assert_eq_ledger_bootstrap_state(
-        &ledger_bootstrap_state,
-        &bootstrap_res.final_ledger.unwrap(),
-    );
+    // check final states
+    assert_eq_final_state(&final_state.read(), &final_state_client.read());
 
     // check states
     assert_eq_thread_cycle_states(&sent_pos, &bootstrap_res.pos.unwrap());

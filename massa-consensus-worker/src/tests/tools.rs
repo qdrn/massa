@@ -6,24 +6,30 @@ use super::{
     mock_protocol_controller::MockProtocolController,
 };
 use crate::start_consensus_controller;
+
+use massa_cipher::decrypt;
+use massa_consensus_exports::{error::ConsensusResult, tools::TEST_PASSWORD};
 use massa_consensus_exports::{
     settings::ConsensusChannels, ConsensusCommandSender, ConsensusConfig, ConsensusEventReceiver,
 };
 use massa_execution_exports::test_exports::MockExecutionController;
 use massa_graph::{export_active_block::ExportActiveBlock, BlockGraphExport, BootstrapableGraph};
-use massa_hash::hash::Hash;
+use massa_hash::Hash;
+use massa_models::prehash::Map;
 use massa_models::{
-    prehash::Set, Address, Amount, Block, BlockHeader, BlockHeaderContent, BlockId, Endorsement,
-    EndorsementContent, Operation, OperationContent, OperationType, SerializeCompact, Slot,
+    prehash::Set,
+    wrapped::{Id, WrappedContent},
+    Address, Amount, Block, BlockHeader, BlockHeaderSerializer, BlockId, BlockSerializer,
+    Endorsement, EndorsementSerializer, Operation, OperationSerializer, OperationType, Slot,
+    WrappedBlock, WrappedEndorsement, WrappedOperation,
 };
 use massa_pool::PoolCommand;
 use massa_proof_of_stake_exports::ExportProofOfStake;
 use massa_protocol_exports::ProtocolCommand;
-use massa_signature::{
-    derive_public_key, generate_random_private_key, sign, PrivateKey, PublicKey, Signature,
-};
+use massa_signature::KeyPair;
+use massa_storage::Storage;
 use massa_time::MassaTime;
-use std::{collections::HashSet, future::Future};
+use std::{collections::HashSet, future::Future, path::Path};
 use std::{
     str::FromStr,
     sync::{Arc, Mutex},
@@ -38,40 +44,32 @@ pub fn get_dummy_block_id(s: &str) -> BlockId {
 
 pub struct AddressTest {
     pub address: Address,
-    pub private_key: PrivateKey,
-    pub public_key: PublicKey,
+    pub keypair: KeyPair,
 }
 
-impl From<AddressTest> for (Address, PrivateKey, PublicKey) {
+impl From<AddressTest> for (Address, KeyPair) {
     fn from(addr: AddressTest) -> Self {
-        (addr.address, addr.private_key, addr.public_key)
+        (addr.address, addr.keypair)
     }
 }
 
 /// Same as `random_address()` but force a specific thread
 pub fn random_address_on_thread(thread: u8, thread_count: u8) -> AddressTest {
     loop {
-        let private_key = generate_random_private_key();
-        let public_key = derive_public_key(&private_key);
-        let address = Address::from_public_key(&public_key);
+        let keypair = KeyPair::generate();
+        let address = Address::from_public_key(&keypair.get_public_key());
         if thread == address.get_thread(thread_count) {
-            return AddressTest {
-                address,
-                private_key,
-                public_key,
-            };
+            return AddressTest { address, keypair };
         }
     }
 }
 
 /// Generate a random address
 pub fn random_address() -> AddressTest {
-    let private_key = generate_random_private_key();
-    let public_key = derive_public_key(&private_key);
+    let keypair = KeyPair::generate();
     AddressTest {
-        address: Address::from_public_key(&public_key),
-        public_key,
-        private_key,
+        address: Address::from_public_key(&keypair.get_public_key()),
+        keypair,
     }
 }
 
@@ -289,31 +287,32 @@ pub async fn create_and_test_block(
     best_parents: Vec<BlockId>,
     valid: bool,
     trace: bool,
-    creator: PrivateKey,
+    creator: &KeyPair,
 ) -> BlockId {
-    let (block_hash, block, _) = create_block(cfg, slot, best_parents, creator);
+    let block = create_block(cfg, slot, best_parents, creator);
+    let block_id = block.id;
     if trace {
-        info!("create block:{}", block_hash);
+        info!("create block:{}", block.id);
     }
 
     protocol_controller.receive_block(block).await;
     if valid {
         // Assert that the block is propagated.
-        validate_propagate_block(protocol_controller, block_hash, 2000).await;
+        validate_propagate_block(protocol_controller, block_id, 2000).await;
     } else {
         // Assert that the the block is not propagated.
-        validate_notpropagate_block(protocol_controller, block_hash, 500).await;
+        validate_notpropagate_block(protocol_controller, block_id, 500).await;
     }
-    block_hash
+    block_id
 }
 
 pub async fn propagate_block(
     protocol_controller: &mut MockProtocolController,
-    block: Block,
+    block: WrappedBlock,
     valid: bool,
     timeout_ms: u64,
 ) -> BlockId {
-    let block_hash = block.header.compute_block_id().unwrap();
+    let block_hash = block.id;
     protocol_controller.receive_block(block).await;
     if valid {
         // see if the block is propagated.
@@ -326,28 +325,24 @@ pub async fn propagate_block(
 }
 
 pub fn create_roll_transaction(
-    priv_key: PrivateKey,
-    sender_public_key: PublicKey,
+    keypair: &KeyPair,
     roll_count: u64,
     buy: bool,
     expire_period: u64,
     fee: u64,
-) -> Operation {
+) -> WrappedOperation {
     let op = if buy {
         OperationType::RollBuy { roll_count }
     } else {
         OperationType::RollSell { roll_count }
     };
 
-    let content = OperationContent {
-        sender_public_key,
+    let content = Operation {
         fee: Amount::from_str(&fee.to_string()).unwrap(),
         expire_period,
         op,
     };
-    let hash = Hash::compute_from(&content.to_bytes_compact().unwrap());
-    let signature = sign(&hash, &priv_key).unwrap();
-    Operation { content, signature }
+    Operation::new_wrapped(content, OperationSerializer::new(), &keypair).unwrap()
 }
 
 pub async fn wait_pool_slot(
@@ -372,40 +367,35 @@ pub async fn wait_pool_slot(
 }
 
 pub fn create_transaction(
-    priv_key: PrivateKey,
-    sender_public_key: PublicKey,
+    keypair: &KeyPair,
     recipient_address: Address,
     amount: u64,
     expire_period: u64,
     fee: u64,
-) -> Operation {
+) -> WrappedOperation {
     let op = OperationType::Transaction {
         recipient_address,
         amount: Amount::from_str(&amount.to_string()).unwrap(),
     };
 
-    let content = OperationContent {
-        sender_public_key,
+    let content = Operation {
         fee: Amount::from_str(&fee.to_string()).unwrap(),
         expire_period,
         op,
     };
-    let hash = Hash::compute_from(&content.to_bytes_compact().unwrap());
-    let signature = sign(&hash, &priv_key).unwrap();
-    Operation { content, signature }
+    Operation::new_wrapped(content, OperationSerializer::new(), keypair).unwrap()
 }
 
 #[allow(clippy::too_many_arguments)]
 pub fn create_executesc(
-    priv_key: PrivateKey,
-    sender_public_key: PublicKey,
+    keypair: &KeyPair,
     expire_period: u64,
     fee: u64,
     data: Vec<u8>,
     max_gas: u64,
     coins: u64,
     gas_price: u64,
-) -> Operation {
+) -> WrappedOperation {
     let op = OperationType::ExecuteSC {
         data,
         max_gas,
@@ -413,53 +403,42 @@ pub fn create_executesc(
         gas_price: Amount::from_str(&gas_price.to_string()).unwrap(),
     };
 
-    let content = OperationContent {
-        sender_public_key,
+    let content = Operation {
         fee: Amount::from_str(&fee.to_string()).unwrap(),
         expire_period,
         op,
     };
-    let hash = Hash::compute_from(&content.to_bytes_compact().unwrap());
-    let signature = sign(&hash, &priv_key).unwrap();
-    Operation { content, signature }
+    Operation::new_wrapped(content, OperationSerializer::new(), keypair).unwrap()
 }
 
 pub fn create_roll_buy(
-    priv_key: PrivateKey,
+    keypair: &KeyPair,
     roll_count: u64,
     expire_period: u64,
     fee: u64,
-) -> Operation {
+) -> WrappedOperation {
     let op = OperationType::RollBuy { roll_count };
-    let sender_public_key = derive_public_key(&priv_key);
-    let content = OperationContent {
-        sender_public_key,
+    let content = Operation {
         fee: Amount::from_str(&fee.to_string()).unwrap(),
         expire_period,
         op,
     };
-    let hash = Hash::compute_from(&content.to_bytes_compact().unwrap());
-    let signature = sign(&hash, &priv_key).unwrap();
-    Operation { content, signature }
+    Operation::new_wrapped(content, OperationSerializer::new(), &keypair).unwrap()
 }
 
 pub fn create_roll_sell(
-    priv_key: PrivateKey,
+    keypair: &KeyPair,
     roll_count: u64,
     expire_period: u64,
     fee: u64,
-) -> Operation {
+) -> WrappedOperation {
     let op = OperationType::RollSell { roll_count };
-    let sender_public_key = derive_public_key(&priv_key);
-    let content = OperationContent {
-        sender_public_key,
+    let content = Operation {
         fee: Amount::from_str(&fee.to_string()).unwrap(),
         expire_period,
         op,
     };
-    let hash = Hash::compute_from(&content.to_bytes_compact().unwrap());
-    let signature = sign(&hash, &priv_key).unwrap();
-    Operation { content, signature }
+    Operation::new_wrapped(content, OperationSerializer::new(), &keypair).unwrap()
 }
 
 // returns hash and resulting discarded blocks
@@ -467,8 +446,8 @@ pub fn create_block(
     cfg: &ConsensusConfig,
     slot: Slot,
     best_parents: Vec<BlockId>,
-    creator: PrivateKey,
-) -> (BlockId, Block, PrivateKey) {
+    creator: &KeyPair,
+) -> WrappedBlock {
     create_block_with_merkle_root(
         cfg,
         Hash::compute_from("default_val".as_bytes()),
@@ -484,136 +463,187 @@ pub fn create_block_with_merkle_root(
     operation_merkle_root: Hash,
     slot: Slot,
     best_parents: Vec<BlockId>,
-    creator: PrivateKey,
-) -> (BlockId, Block, PrivateKey) {
-    let public_key = derive_public_key(&creator);
-    let (hash, header) = BlockHeader::new_signed(
-        &creator,
-        BlockHeaderContent {
-            creator: public_key,
+    creator: &KeyPair,
+) -> WrappedBlock {
+    let header = BlockHeader::new_wrapped(
+        BlockHeader {
             slot,
             parents: best_parents,
             operation_merkle_root,
             endorsements: Vec::new(),
         },
+        BlockHeaderSerializer::new(),
+        &creator,
     )
     .unwrap();
 
-    let block = Block {
-        header,
-        operations: Vec::new(),
-    };
+    let block = Block::new_wrapped(
+        Block {
+            header,
+            operations: Vec::new(),
+        },
+        BlockSerializer::new(),
+        &creator,
+    )
+    .unwrap();
 
-    (hash, block, creator)
+    block
 }
 
 /// Creates an endorsement for use in consensus tests.
 pub fn create_endorsement(
-    sender_priv: PrivateKey,
+    sender_keypair: &KeyPair,
     slot: Slot,
     endorsed_block: BlockId,
     index: u32,
-) -> Endorsement {
-    let sender_public_key = derive_public_key(&sender_priv);
-
-    let content = EndorsementContent {
-        sender_public_key,
+) -> WrappedEndorsement {
+    let content = Endorsement {
         slot,
         index,
         endorsed_block,
     };
-    let hash = Hash::compute_from(&content.to_bytes_compact().unwrap());
-    let signature = sign(&hash, &sender_priv).unwrap();
-    Endorsement { content, signature }
+    Endorsement::new_wrapped(content, EndorsementSerializer::new(), sender_keypair).unwrap()
 }
 
 pub fn get_export_active_test_block(
-    creator: PublicKey,
     parents: Vec<(BlockId, u64)>,
-    operations: Vec<Operation>,
+    operations: Vec<WrappedOperation>,
     slot: Slot,
     is_final: bool,
-) -> (ExportActiveBlock, BlockId) {
-    let block = Block {
-        header: BlockHeader {
-            content: BlockHeaderContent{
-                creator,
-                operation_merkle_root: Hash::compute_from(&operations.iter().flat_map(|op|{
-                    op
-                        .get_operation_id()
-                        .unwrap()
-                        .to_bytes()
-                    })
-                    .collect::<Vec<_>>()[..]),
-                parents: parents.iter()
-                    .map(|(id,_)| *id)
-                    .collect(),
-                slot,
-                endorsements: Vec::new(),
-            },
-            signature: Signature::from_bs58_check(
-                "5f4E3opXPWc3A1gvRVV7DJufvabDfaLkT1GMterpJXqRZ5B7bxPe5LoNzGDQp9LkphQuChBN1R5yEvVJqanbjx7mgLEae"
-            ).unwrap()
+) -> ExportActiveBlock {
+    let keypair = KeyPair::generate();
+    let block = Block::new_wrapped(
+        Block {
+            header: BlockHeader::new_wrapped(
+                BlockHeader {
+                    operation_merkle_root: Hash::compute_from(
+                        &operations
+                            .iter()
+                            .flat_map(|op| op.id.into_bytes())
+                            .collect::<Vec<_>>()[..],
+                    ),
+                    parents: parents.iter().map(|(id, _)| *id).collect(),
+                    slot,
+                    endorsements: Vec::new(),
+                },
+                BlockHeaderSerializer::new(),
+                &keypair,
+            )
+            .unwrap(),
+            operations: operations.clone(),
         },
-        operations: operations.clone(),
-    };
-    let id = block.header.compute_block_id().unwrap();
-    (
-        ExportActiveBlock {
-            parents,
-            dependencies: Default::default(),
-            block,
-            children: vec![Default::default(), Default::default()],
-            is_final,
-            block_ledger_changes: Default::default(),
-            roll_updates: Default::default(),
-            production_events: vec![],
-        },
-        id,
+        BlockSerializer::new(),
+        &keypair,
     )
+    .unwrap();
+
+    ExportActiveBlock {
+        parents,
+        dependencies: Default::default(),
+        block: block.clone(),
+        block_id: block.id,
+        children: vec![Default::default(), Default::default()],
+        is_final,
+        block_ledger_changes: Default::default(),
+        roll_updates: Default::default(),
+        production_events: vec![],
+    }
 }
 
 pub fn create_block_with_operations(
     _cfg: &ConsensusConfig,
     slot: Slot,
     best_parents: &Vec<BlockId>,
-    creator: PrivateKey,
-    operations: Vec<Operation>,
-) -> (BlockId, Block, PrivateKey) {
-    let public_key = derive_public_key(&creator);
-
+    creator: &KeyPair,
+    operations: Vec<WrappedOperation>,
+) -> WrappedBlock {
     let operation_merkle_root = Hash::compute_from(
         &operations.iter().fold(Vec::new(), |acc, v| {
-            [acc, v.to_bytes_compact().unwrap()].concat()
+            [acc, v.id.hash().to_bytes().to_vec()].concat()
         })[..],
     );
 
-    let (hash, header) = BlockHeader::new_signed(
-        &creator,
-        BlockHeaderContent {
-            creator: public_key,
+    let header = BlockHeader::new_wrapped(
+        BlockHeader {
             slot,
             parents: best_parents.clone(),
             operation_merkle_root,
             endorsements: Vec::new(),
         },
+        BlockHeaderSerializer::new(),
+        &creator,
     )
     .unwrap();
 
-    let block = Block { header, operations };
+    let block = Block::new_wrapped(
+        Block { header, operations },
+        BlockSerializer::new(),
+        creator,
+    )
+    .unwrap();
 
-    (hash, block, creator)
+    block
 }
 
-pub fn get_creator_for_draw(draw: &Address, nodes: &Vec<PrivateKey>) -> PrivateKey {
+pub fn create_block_with_operations_and_endorsements(
+    _cfg: &ConsensusConfig,
+    slot: Slot,
+    best_parents: &Vec<BlockId>,
+    creator: &KeyPair,
+    operations: Vec<WrappedOperation>,
+    endorsements: Vec<WrappedEndorsement>,
+) -> WrappedBlock {
+    let operation_merkle_root = Hash::compute_from(
+        &operations.iter().fold(Vec::new(), |acc, v| {
+            [acc, v.id.hash().to_bytes().to_vec()].concat()
+        })[..],
+    );
+
+    let header = BlockHeader::new_wrapped(
+        BlockHeader {
+            slot,
+            parents: best_parents.clone(),
+            operation_merkle_root,
+            endorsements,
+        },
+        BlockHeaderSerializer::new(),
+        creator,
+    )
+    .unwrap();
+
+    let block = Block::new_wrapped(
+        Block { header, operations },
+        BlockSerializer::new(),
+        creator,
+    )
+    .unwrap();
+
+    block
+}
+
+pub fn get_creator_for_draw(draw: &Address, nodes: &Vec<KeyPair>) -> KeyPair {
     for key in nodes.iter() {
-        let pub_key = derive_public_key(key);
-        let address = Address::from_public_key(&pub_key);
+        let address = Address::from_public_key(&key.get_public_key());
         if address == *draw {
-            return *key;
+            return key.clone();
         }
     }
     panic!("Matching key for draw not found.");
+}
+
+/// Load staking keys from file and derive public keys and addresses
+pub async fn load_initial_staking_keys(
+    path: &Path,
+    password: &str,
+) -> ConsensusResult<Map<Address, KeyPair>> {
+    if !std::path::Path::is_file(path) {
+        return Ok(Map::default());
+    }
+    let (_version, data) = decrypt(password, &tokio::fs::read(path).await?)?;
+    serde_json::from_slice::<Vec<KeyPair>>(&data)?
+        .into_iter()
+        .map(|key| Ok((Address::from_public_key(&key.get_public_key()), key)))
+        .collect()
 }
 
 /// Runs a consensus test, passing a mock pool controller to it.
@@ -638,6 +668,12 @@ pub async fn consensus_pool_test<F, V>(
         ),
     >,
 {
+    let storage: Storage = Default::default();
+    if let Some(ref graph) = boot_graph {
+        for (_, export_block) in &graph.active_blocks {
+            storage.store_block(export_block.block.clone());
+        }
+    }
     // mock protocol & pool
     let (protocol_controller, protocol_command_sender, protocol_event_receiver) =
         MockProtocolController::new();
@@ -651,8 +687,8 @@ pub async fn consensus_pool_test<F, V>(
             let _ = execution_rx.recv_timeout(Duration::from_millis(500));
         }
     });
-
     // launch consensus controller
+    let password = TEST_PASSWORD.to_string();
     let (consensus_command_sender, consensus_event_receiver, consensus_manager) =
         start_consensus_controller(
             cfg.clone(),
@@ -664,7 +700,12 @@ pub async fn consensus_pool_test<F, V>(
             },
             boot_pos,
             boot_graph,
+            storage.clone(),
             0,
+            password.clone(),
+            load_initial_staking_keys(&cfg.staking_keys_path, &password)
+                .await
+                .unwrap(),
         )
         .await
         .expect("could not start consensus controller");
@@ -698,6 +739,101 @@ pub async fn consensus_pool_test<F, V>(
     execution_sink.join().unwrap();
 }
 
+/// Runs a consensus test, passing a mock pool controller to it.
+pub async fn consensus_pool_test_with_storage<F, V>(
+    cfg: ConsensusConfig,
+    boot_pos: Option<ExportProofOfStake>,
+    boot_graph: Option<BootstrapableGraph>,
+    test: F,
+) where
+    F: FnOnce(
+        MockPoolController,
+        MockProtocolController,
+        ConsensusCommandSender,
+        ConsensusEventReceiver,
+        Storage,
+    ) -> V,
+    V: Future<
+        Output = (
+            MockPoolController,
+            MockProtocolController,
+            ConsensusCommandSender,
+            ConsensusEventReceiver,
+        ),
+    >,
+{
+    let storage: Storage = Default::default();
+    if let Some(ref graph) = boot_graph {
+        for (_, export_block) in &graph.active_blocks {
+            storage.store_block(export_block.block.clone());
+        }
+    }
+    // mock protocol & pool
+    let (protocol_controller, protocol_command_sender, protocol_event_receiver) =
+        MockProtocolController::new();
+    let (pool_controller, pool_command_sender) = MockPoolController::new();
+    // for now, execution_rx is ignored: cique updates to Execution pile up and are discarded
+    let (execution_controller, execution_rx) = MockExecutionController::new_with_receiver();
+    let stop_sinks = Arc::new(Mutex::new(false));
+    let stop_sinks_clone = stop_sinks.clone();
+    let execution_sink = std::thread::spawn(move || {
+        while !*stop_sinks_clone.lock().unwrap() {
+            let _ = execution_rx.recv_timeout(Duration::from_millis(500));
+        }
+    });
+    // launch consensus controller
+    let password = TEST_PASSWORD.to_string();
+    let (consensus_command_sender, consensus_event_receiver, consensus_manager) =
+        start_consensus_controller(
+            cfg.clone(),
+            ConsensusChannels {
+                execution_controller,
+                protocol_command_sender: protocol_command_sender.clone(),
+                protocol_event_receiver,
+                pool_command_sender,
+            },
+            boot_pos,
+            boot_graph,
+            storage.clone(),
+            0,
+            password.clone(),
+            load_initial_staking_keys(&cfg.staking_keys_path, &password)
+                .await
+                .unwrap(),
+        )
+        .await
+        .expect("could not start consensus controller");
+
+    // Call test func.
+    let (
+        pool_controller,
+        mut protocol_controller,
+        _consensus_command_sender,
+        consensus_event_receiver,
+    ) = test(
+        pool_controller,
+        protocol_controller,
+        consensus_command_sender,
+        consensus_event_receiver,
+        storage,
+    )
+    .await;
+
+    // stop controller while ignoring all commands
+    let stop_fut = consensus_manager.stop(consensus_event_receiver);
+    let pool_sink = PoolCommandSink::new(pool_controller).await;
+    tokio::pin!(stop_fut);
+    protocol_controller
+        .ignore_commands_while(stop_fut)
+        .await
+        .unwrap();
+    pool_sink.stop().await;
+
+    // stop sinks
+    *stop_sinks.lock().unwrap() = true;
+    execution_sink.join().unwrap();
+}
+
 /// Runs a consensus test, without passing a mock pool controller to it.
 pub async fn consensus_without_pool_test<F, V>(cfg: ConsensusConfig, test: F)
 where
@@ -710,6 +846,79 @@ where
         ),
     >,
 {
+    let storage: Storage = Default::default();
+    // mock protocol & pool
+    let (protocol_controller, protocol_command_sender, protocol_event_receiver) =
+        MockProtocolController::new();
+    let (pool_controller, pool_command_sender) = MockPoolController::new();
+    // for now, execution_rx is ignored: clique updates to Execution pile up and are discarded
+    let (execution_controller, execution_rx) = MockExecutionController::new_with_receiver();
+    let stop_sinks = Arc::new(Mutex::new(false));
+    let stop_sinks_clone = stop_sinks.clone();
+    let execution_sink = std::thread::spawn(move || {
+        while !*stop_sinks_clone.lock().unwrap() {
+            let _ = execution_rx.recv_timeout(Duration::from_millis(500));
+        }
+    });
+    let pool_sink = PoolCommandSink::new(pool_controller).await;
+    // launch consensus controller
+    let password = TEST_PASSWORD.to_string();
+    let (consensus_command_sender, consensus_event_receiver, consensus_manager) =
+        start_consensus_controller(
+            cfg.clone(),
+            ConsensusChannels {
+                execution_controller,
+                protocol_command_sender: protocol_command_sender.clone(),
+                protocol_event_receiver,
+                pool_command_sender,
+            },
+            None,
+            None,
+            storage.clone(),
+            0,
+            password.clone(),
+            load_initial_staking_keys(&cfg.staking_keys_path, &password)
+                .await
+                .unwrap(),
+        )
+        .await
+        .expect("could not start consensus controller");
+
+    // Call test func.
+    let (mut protocol_controller, _consensus_command_sender, consensus_event_receiver) = test(
+        protocol_controller,
+        consensus_command_sender,
+        consensus_event_receiver,
+    )
+    .await;
+
+    // stop controller while ignoring all commands
+    let stop_fut = consensus_manager.stop(consensus_event_receiver);
+    tokio::pin!(stop_fut);
+    protocol_controller
+        .ignore_commands_while(stop_fut)
+        .await
+        .unwrap();
+    pool_sink.stop().await;
+
+    // stop sinks
+    *stop_sinks.lock().unwrap() = true;
+    execution_sink.join().unwrap();
+}
+
+/// Runs a consensus test, without passing a mock pool controller to it.
+pub async fn consensus_without_pool_test_with_storage<F, V>(cfg: ConsensusConfig, test: F)
+where
+    F: FnOnce(MockProtocolController, ConsensusCommandSender, ConsensusEventReceiver, Storage) -> V,
+    V: Future<
+        Output = (
+            MockProtocolController,
+            ConsensusCommandSender,
+            ConsensusEventReceiver,
+        ),
+    >,
+{
+    let storage: Storage = Default::default();
     // mock protocol & pool
     let (protocol_controller, protocol_command_sender, protocol_event_receiver) =
         MockProtocolController::new();
@@ -724,8 +933,8 @@ where
         }
     });
     let pool_sink = PoolCommandSink::new(pool_controller).await;
-
     // launch consensus controller
+    let password = TEST_PASSWORD.to_string();
     let (consensus_command_sender, consensus_event_receiver, consensus_manager) =
         start_consensus_controller(
             cfg.clone(),
@@ -737,7 +946,12 @@ where
             },
             None,
             None,
+            storage.clone(),
             0,
+            password.clone(),
+            load_initial_staking_keys(&cfg.staking_keys_path, &password)
+                .await
+                .unwrap(),
         )
         .await
         .expect("could not start consensus controller");
@@ -747,6 +961,7 @@ where
         protocol_controller,
         consensus_command_sender,
         consensus_event_receiver,
+        storage,
     )
     .await;
 

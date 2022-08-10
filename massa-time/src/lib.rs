@@ -1,22 +1,117 @@
 // Copyright (c) 2022 MASSA LABS <info@massa.net>
+//! Unsigned time management
+#![warn(missing_docs)]
+#![warn(unused_crate_dependencies)]
+#![feature(bound_map)]
 
 mod error;
-use chrono::{self, DateTime, NaiveDateTime, Utc};
 pub use error::TimeError;
+use massa_serialization::{Deserializer, Serializer, U64VarIntDeserializer, U64VarIntSerializer};
+use nom::error::{context, ContextError, ParseError};
+use nom::IResult;
+use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::ops::Bound;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::{
     convert::{TryFrom, TryInto},
     str::FromStr,
 };
+use time::format_description::well_known::Rfc3339;
+use time::OffsetDateTime;
 use tokio::time::Instant;
 
-use serde::{Deserialize, Serialize};
-
-/// Time structure used every where.
-/// Millis since 01/01/1970.
+/// Time structure used everywhere.
+/// milliseconds since 01/01/1970.
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct MassaTime(u64);
+
+/// Serializer for `MassaTime`
+pub struct MassaTimeSerializer {
+    u64_serializer: U64VarIntSerializer,
+}
+
+impl MassaTimeSerializer {
+    /// Creates a `MassaTimeSerializer`
+    pub fn new() -> Self {
+        Self {
+            u64_serializer: U64VarIntSerializer::new(),
+        }
+    }
+}
+
+impl Default for MassaTimeSerializer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Serializer<MassaTime> for MassaTimeSerializer {
+    /// ```
+    /// use std::ops::Bound::Included;
+    /// use massa_serialization::Serializer;
+    /// use massa_time::{MassaTime, MassaTimeSerializer};
+    ///
+    /// let time: MassaTime = 30.into();
+    /// let mut serialized = Vec::new();
+    /// let serializer = MassaTimeSerializer::new();
+    /// serializer.serialize(&time, &mut serialized).unwrap();
+    /// ```
+    fn serialize(
+        &self,
+        value: &MassaTime,
+        buffer: &mut Vec<u8>,
+    ) -> Result<(), massa_serialization::SerializeError> {
+        self.u64_serializer.serialize(&value.to_millis(), buffer)
+    }
+}
+
+/// Deserializer for `MassaTime`
+pub struct MassaTimeDeserializer {
+    u64_deserializer: U64VarIntDeserializer,
+}
+
+impl MassaTimeDeserializer {
+    /// Creates a `MassaTimeDeserializer`
+    ///
+    /// Arguments:
+    /// * range: minimum value for the time to deserialize
+    pub fn new(range: (Bound<MassaTime>, Bound<MassaTime>)) -> Self {
+        Self {
+            u64_deserializer: U64VarIntDeserializer::new(
+                range.0.map(|time| time.to_millis()),
+                range.1.map(|time| time.to_millis()),
+            ),
+        }
+    }
+}
+
+impl Deserializer<MassaTime> for MassaTimeDeserializer {
+    /// ```
+    /// use std::ops::Bound::Included;
+    /// use massa_serialization::{Serializer, Deserializer, DeserializeError};
+    /// use massa_time::{MassaTime, MassaTimeSerializer, MassaTimeDeserializer};
+    ///
+    /// let time: MassaTime = 30.into();
+    /// let mut serialized = Vec::new();
+    /// let serializer = MassaTimeSerializer::new();
+    /// let deserializer = MassaTimeDeserializer::new((Included(0.into()), Included(u64::MAX.into())));
+    /// serializer.serialize(&time, &mut serialized).unwrap();
+    /// let (rest, time_deser) = deserializer.deserialize::<DeserializeError>(&serialized).unwrap();
+    /// assert!(rest.is_empty());
+    /// assert_eq!(time, time_deser);
+    /// ```
+    fn deserialize<'a, E: ParseError<&'a [u8]> + ContextError<&'a [u8]>>(
+        &self,
+        buffer: &'a [u8],
+    ) -> IResult<&'a [u8], MassaTime, E> {
+        context("Failed MassaTime deserialization", |input| {
+            self.u64_deserializer
+                .deserialize(input)
+                .map(|(rest, res)| (rest, res.into()))
+        })(buffer)
+    }
+}
 
 impl fmt::Display for MassaTime {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -47,7 +142,7 @@ impl TryFrom<Duration> for MassaTime {
 }
 
 impl From<u64> for MassaTime {
-    /// Conversion from u64, representing timestamp in millis.
+    /// Conversion from `u64`, representing timestamp in milliseconds.
     /// ```
     /// # use massa_time::*;
     /// let time : MassaTime = MassaTime::from(42);
@@ -58,7 +153,7 @@ impl From<u64> for MassaTime {
 }
 
 impl From<MassaTime> for Duration {
-    /// Conversion massa_time to duration, representing timestamp in millis.
+    /// Conversion from `massa_time` to duration, representing timestamp in milliseconds.
     /// ```
     /// # use std::time::Duration;
     /// # use massa_time::*;
@@ -94,7 +189,7 @@ impl FromStr for MassaTime {
 }
 
 impl MassaTime {
-    /// Conversion from u64, representing timestamp in millis.
+    /// Conversion from `u64`, representing timestamp in milliseconds.
     /// ```
     /// # use massa_time::*;
     /// let time : MassaTime = MassaTime::from(42);
@@ -106,10 +201,10 @@ impl MassaTime {
     /// Smallest time interval
     pub const EPSILON: MassaTime = MassaTime(1);
 
-    /// Gets current compensated unix timestamp (resolution: milliseconds).
+    /// Gets current compensated UNIX timestamp (resolution: milliseconds).
     ///
     /// # Parameters
-    ///   * compensation_millis: when the system clock is slightly off, this parameter allows correcting it by adding this signed number of milliseconds to the locally measured timestamp
+    ///   * `compensation_millis`: when the system clock is slightly off, this parameter allows correcting it by adding this signed number of milliseconds to the locally measured timestamp
     ///
     /// ```
     /// # use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -136,7 +231,7 @@ impl MassaTime {
         Ok(MassaTime(compensated))
     }
 
-    /// Gets current unix timestamp (resolution: milliseconds).
+    /// Gets current UNIX timestamp (resolution: milliseconds).
     ///
     /// ```
     /// # use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -171,7 +266,7 @@ impl MassaTime {
         Duration::from_millis(self.0)
     }
 
-    /// Conversion to u64, representing millis.
+    /// Conversion to `u64`, representing milliseconds.
     /// ```
     /// # use massa_time::*;
     /// let time : MassaTime = MassaTime::from(42);
@@ -338,16 +433,12 @@ impl MassaTime {
 
     /// ```
     /// # use massa_time::*;
-    /// let massa_time : MassaTime = MassaTime::from(0);
-    /// assert_eq!(massa_time.to_utc_string(), "1970-01-01 00:00:00 UTC")
+    /// let massa_time : MassaTime = MassaTime::from(1_640_995_200_000);
+    /// assert_eq!(massa_time.to_utc_string(), "2022-01-01T00:00:00Z")
     /// ```
     pub fn to_utc_string(self) -> String {
-        let naive = NaiveDateTime::from_timestamp(
-            (self.to_millis() / 1000) as i64,
-            ((self.to_millis() % 1000) * 1_000_000) as u32,
-        );
-        let datetime: DateTime<Utc> = DateTime::from_utc(naive, Utc);
-        format!("{}", datetime)
+        let naive = OffsetDateTime::from_unix_timestamp((self.to_millis() / 1000) as i64).unwrap();
+        naive.format(&Rfc3339).unwrap()
     }
 
     /// ```
@@ -360,17 +451,17 @@ impl MassaTime {
     /// assert_eq!(secs, 6);
     /// ```
     pub fn days_hours_mins_secs(&self) -> Result<(i64, i64, i64, i64), TimeError> {
-        let time = chrono::Duration::from_std(self.to_duration())
+        let time: time::Duration = time::Duration::try_from(self.to_duration())
             .map_err(|_| TimeError::TimeOverflowError)?;
-        let days = time.num_days();
-        let hours = (time - chrono::Duration::days(days)).num_hours();
+        let days = time.whole_days();
+        let hours = (time - time::Duration::days(days)).whole_hours();
         let mins =
-            (time - chrono::Duration::days(days) - chrono::Duration::hours(hours)).num_minutes();
+            (time - time::Duration::days(days) - time::Duration::hours(hours)).whole_minutes();
         let secs = (time
-            - chrono::Duration::days(days)
-            - chrono::Duration::hours(hours)
-            - chrono::Duration::minutes(mins))
-        .num_seconds();
+            - time::Duration::days(days)
+            - time::Duration::hours(hours)
+            - time::Duration::minutes(mins))
+        .whole_seconds();
         Ok((days, hours, mins, secs))
     }
 }

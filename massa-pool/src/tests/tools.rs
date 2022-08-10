@@ -3,14 +3,13 @@
 use super::mock_protocol_controller::MockProtocolController;
 use crate::{pool_controller, settings::PoolConfig, PoolCommandSender, PoolManager};
 use futures::Future;
-use massa_hash::hash::Hash;
+use massa_hash::Hash;
 use massa_models::{
-    Address, Amount, BlockId, Endorsement, EndorsementContent, Operation, OperationContent,
-    OperationType, SerializeCompact, Slot,
+    wrapped::WrappedContent, Address, Amount, BlockId, Endorsement, EndorsementSerializer,
+    Operation, OperationSerializer, OperationType, Slot, WrappedEndorsement, WrappedOperation,
 };
-use massa_signature::{
-    derive_public_key, generate_random_private_key, sign, PrivateKey, PublicKey,
-};
+use massa_signature::{KeyPair, PublicKey};
+use massa_storage::Storage;
 use std::str::FromStr;
 
 pub async fn pool_test<F, V>(cfg: &'static PoolConfig, test: F)
@@ -18,6 +17,8 @@ where
     F: FnOnce(MockProtocolController, PoolCommandSender, PoolManager) -> V,
     V: Future<Output = (MockProtocolController, PoolCommandSender, PoolManager)>,
 {
+    let storage: Storage = Default::default();
+
     let (protocol_controller, protocol_command_sender, protocol_pool_event_receiver) =
         MockProtocolController::new();
 
@@ -25,6 +26,7 @@ where
         cfg,
         protocol_command_sender,
         protocol_pool_event_receiver,
+        storage,
     )
     .await
     .unwrap();
@@ -35,72 +37,49 @@ where
     pool_manager.stop().await.unwrap();
 }
 
-pub fn get_transaction(expire_period: u64, fee: u64) -> (Operation, u8) {
-    let sender_priv = generate_random_private_key();
-    let sender_pub = derive_public_key(&sender_priv);
-
-    let recv_priv = generate_random_private_key();
-    let recv_pub = derive_public_key(&recv_priv);
+pub fn get_transaction(expire_period: u64, fee: u64) -> WrappedOperation {
+    let sender_keypair = KeyPair::generate();
 
     let op = OperationType::Transaction {
-        recipient_address: Address::from_public_key(&recv_pub),
+        recipient_address: Address::from_public_key(&KeyPair::generate().get_public_key()),
         amount: Amount::default(),
     };
-    let content = OperationContent {
+    let content = Operation {
         fee: Amount::from_str(&fee.to_string()).unwrap(),
         op,
-        sender_public_key: sender_pub,
         expire_period,
     };
-    let hash = Hash::compute_from(&content.to_bytes_compact().unwrap());
-    let signature = sign(&hash, &sender_priv).unwrap();
-
-    (
-        Operation { content, signature },
-        Address::from_public_key(&sender_pub).get_thread(2),
-    )
+    Operation::new_wrapped(content, OperationSerializer::new(), &sender_keypair).unwrap()
 }
 
 /// Creates an endorsement for use in pool tests.
-pub fn create_endorsement(slot: Slot) -> Endorsement {
-    let sender_priv = generate_random_private_key();
-    let sender_public_key = derive_public_key(&sender_priv);
+pub fn create_endorsement(slot: Slot) -> WrappedEndorsement {
+    let sender_keypair = KeyPair::generate();
 
-    let content = EndorsementContent {
-        sender_public_key,
+    let content = Endorsement {
         slot,
         index: 0,
         endorsed_block: BlockId(Hash::compute_from("blabla".as_bytes())),
     };
-    let hash = Hash::compute_from(&content.to_bytes_compact().unwrap());
-    let signature = sign(&hash, &sender_priv).unwrap();
-    Endorsement { content, signature }
+    Endorsement::new_wrapped(content, EndorsementSerializer::new(), &sender_keypair).unwrap()
 }
 
 pub fn get_transaction_with_addresses(
     expire_period: u64,
     fee: u64,
-    sender_pub: PublicKey,
-    sender_priv: PrivateKey,
+    sender_keypair: &KeyPair,
     recv_pub: PublicKey,
-) -> (Operation, u8) {
+) -> WrappedOperation {
     let op = OperationType::Transaction {
         recipient_address: Address::from_public_key(&recv_pub),
         amount: Amount::default(),
     };
-    let content = OperationContent {
+    let content = Operation {
         fee: Amount::from_str(&fee.to_string()).unwrap(),
         op,
-        sender_public_key: sender_pub,
         expire_period,
     };
-    let hash = Hash::compute_from(&content.to_bytes_compact().unwrap());
-    let signature = sign(&hash, &sender_priv).unwrap();
-
-    (
-        Operation { content, signature },
-        Address::from_public_key(&sender_pub).get_thread(2),
-    )
+    Operation::new_wrapped(content, OperationSerializer::new(), sender_keypair).unwrap()
 }
 
 pub fn create_executesc(
@@ -108,12 +87,11 @@ pub fn create_executesc(
     fee: u64,
     max_gas: u64,
     gas_price: u64,
-) -> (Operation, u8) {
-    let priv_key = generate_random_private_key();
-    let sender_public_key = derive_public_key(&priv_key);
+) -> WrappedOperation {
+    let keypair = KeyPair::generate();
 
     let data = vec![42; 7];
-    let coins = 0;
+    let coins = 0_u64;
 
     let op = OperationType::ExecuteSC {
         data,
@@ -122,16 +100,10 @@ pub fn create_executesc(
         gas_price: Amount::from_str(&gas_price.to_string()).unwrap(),
     };
 
-    let content = OperationContent {
-        sender_public_key,
+    let content = Operation {
         fee: Amount::from_str(&fee.to_string()).unwrap(),
         expire_period,
         op,
     };
-    let hash = Hash::compute_from(&content.to_bytes_compact().unwrap());
-    let signature = sign(&hash, &priv_key).unwrap();
-    (
-        Operation { content, signature },
-        Address::from_public_key(&sender_public_key).get_thread(2),
-    )
+    Operation::new_wrapped(content, OperationSerializer::new(), &keypair).unwrap()
 }

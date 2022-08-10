@@ -4,38 +4,96 @@ use massa_models::{
     constants::*,
     ledger_models::{LedgerChange, LedgerChanges},
     prehash::{BuildMap, Map, Set},
-    rolls::{RollUpdate, RollUpdates},
+    rolls::{RollUpdateDeserializer, RollUpdateSerializer, RollUpdates},
+    wrapped::{WrappedDeserializer, WrappedSerializer},
     *,
 };
+use massa_serialization::{DeserializeError, Deserializer, Serializer};
+use massa_storage::Storage;
 use serde::{Deserialize, Serialize};
 
-/// Exportable version of ActiveBlock
+/// Exportable version of `ActiveBlock`
 /// Fields that can be easily recomputed were left out
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExportActiveBlock {
-    /// The block itself, as it was created
-    pub block: Block,
-    /// one (block id, period) per thread ( if not genesis )
+    /// The block.
+    pub block: WrappedBlock,
+    /// The Id of the block.
+    pub block_id: BlockId,
+    /// one `(block id, period)` per thread ( if not genesis )
     pub parents: Vec<(BlockId, u64)>,
-    /// one HashMap<Block id, period> per thread (blocks that need to be kept)
+    /// one `HashMap<Block id, period>` per thread (blocks that need to be kept)
     /// Children reference that block as a parent
     pub children: Vec<Map<BlockId, u64>>,
     /// dependencies required for validity check
     pub dependencies: Set<BlockId>,
-    /// ie has its fitness reached the given threshold
+    /// for example has its fitness reached the given threshold
     pub is_final: bool,
     /// Changes caused by this block
     pub block_ledger_changes: LedgerChanges,
-    /// Address -> RollUpdate
+    /// `Address -> RollUpdate`
     pub roll_updates: RollUpdates,
-    /// list of (period, address, did_create) for all block/endorsement creation events
+    /// list of `(period, address, did_create)` for all block/endorsement creation events
     pub production_events: Vec<(u64, Address, bool)>,
 }
 
-impl From<&ActiveBlock> for ExportActiveBlock {
-    fn from(a_block: &ActiveBlock) -> Self {
-        ExportActiveBlock {
-            block: a_block.block.clone(),
+impl TryFrom<ExportActiveBlock> for ActiveBlock {
+    fn try_from(a_block: ExportActiveBlock) -> Result<ActiveBlock> {
+        let operation_set = a_block
+            .block
+            .content
+            .operations
+            .iter()
+            .enumerate()
+            .map(|(idx, op)| (op.id, (idx, op.content.expire_period)))
+            .collect();
+
+        let endorsement_ids = a_block
+            .block
+            .content
+            .header
+            .content
+            .endorsements
+            .iter()
+            .map(|endo| (endo.id, endo.content.index))
+            .collect();
+
+        let addresses_to_operations = a_block.block.involved_addresses(&operation_set)?;
+        let addresses_to_endorsements = a_block.block.addresses_to_endorsements()?;
+        Ok(ActiveBlock {
+            creator_address: a_block.block.creator_address,
+            block_id: a_block.block_id,
+            parents: a_block.parents.clone(),
+            children: a_block.children.clone(),
+            dependencies: a_block.dependencies.clone(),
+            descendants: Default::default(), // will be computed once the full graph is available
+            is_final: a_block.is_final,
+            block_ledger_changes: a_block.block_ledger_changes.clone(),
+            operation_set,
+            endorsement_ids,
+            addresses_to_operations,
+            roll_updates: a_block.roll_updates.clone(),
+            production_events: a_block.production_events.clone(),
+            addresses_to_endorsements,
+            slot: a_block.block.content.header.content.slot,
+        })
+    }
+    type Error = GraphError;
+}
+
+impl ExportActiveBlock {
+    /// try conversion from active block to export active block
+    pub fn try_from_active_block(a_block: &ActiveBlock, storage: Storage) -> Result<Self> {
+        let block = storage.retrieve_block(&a_block.block_id).ok_or_else(|| {
+            GraphError::MissingBlock(format!(
+                "missing block ExportActiveBlock::try_from_active_block: {}",
+                a_block.block_id
+            ))
+        })?;
+        let stored_block = block.read();
+        Ok(ExportActiveBlock {
+            block: stored_block.clone(),
+            block_id: a_block.block_id,
             parents: a_block.parents.clone(),
             children: a_block.children.clone(),
             dependencies: a_block.dependencies.clone(),
@@ -43,54 +101,8 @@ impl From<&ActiveBlock> for ExportActiveBlock {
             block_ledger_changes: a_block.block_ledger_changes.clone(),
             roll_updates: a_block.roll_updates.clone(),
             production_events: a_block.production_events.clone(),
-        }
-    }
-}
-
-impl TryFrom<ExportActiveBlock> for ActiveBlock {
-    fn try_from(a_block: ExportActiveBlock) -> Result<ActiveBlock> {
-        let operation_set = a_block
-            .block
-            .operations
-            .iter()
-            .enumerate()
-            .map(|(idx, op)| match op.get_operation_id() {
-                Ok(id) => Ok((id, (idx, op.content.expire_period))),
-                Err(e) => Err(e),
-            })
-            .collect::<Result<_, _>>()?;
-
-        let endorsement_ids = a_block
-            .block
-            .header
-            .content
-            .endorsements
-            .iter()
-            .map(|endo| Ok((endo.compute_endorsement_id()?, endo.content.index)))
-            .collect::<Result<_>>()?;
-
-        let addresses_to_operations = a_block.block.involved_addresses(&operation_set)?;
-        let addresses_to_endorsements =
-            a_block.block.addresses_to_endorsements(&endorsement_ids)?;
-        Ok(ActiveBlock {
-            creator_address: Address::from_public_key(&a_block.block.header.content.creator),
-            block: a_block.block,
-            parents: a_block.parents,
-            children: a_block.children,
-            dependencies: a_block.dependencies,
-            descendants: Default::default(), // will be computed once the full graph is available
-            is_final: a_block.is_final,
-            block_ledger_changes: a_block.block_ledger_changes,
-            operation_set,
-            endorsement_ids,
-            addresses_to_operations,
-            roll_updates: a_block.roll_updates,
-            production_events: a_block.production_events,
-            addresses_to_endorsements,
         })
     }
-
-    type Error = GraphError;
 }
 
 impl SerializeCompact for ExportActiveBlock {
@@ -105,7 +117,7 @@ impl SerializeCompact for ExportActiveBlock {
         }
 
         // block
-        res.extend(self.block.to_bytes_compact()?);
+        WrappedSerializer::new().serialize(&self.block, &mut res)?;
 
         // parents (note: there should be none if slot period=0)
         if self.parents.is_empty() {
@@ -114,7 +126,7 @@ impl SerializeCompact for ExportActiveBlock {
             res.push(1);
         }
         for (hash, period) in self.parents.iter() {
-            res.extend(&hash.to_bytes());
+            res.extend(hash.to_bytes());
             res.extend(period.to_varint_bytes());
         }
 
@@ -132,7 +144,7 @@ impl SerializeCompact for ExportActiveBlock {
             })?;
             res.extend(map_count.to_varint_bytes());
             for (hash, period) in map {
-                res.extend(&hash.to_bytes());
+                res.extend(hash.to_bytes());
                 res.extend(period.to_varint_bytes());
             }
         }
@@ -143,7 +155,7 @@ impl SerializeCompact for ExportActiveBlock {
         })?;
         res.extend(dependencies_count.to_varint_bytes());
         for dep in self.dependencies.iter() {
-            res.extend(&dep.to_bytes());
+            res.extend(dep.to_bytes());
         }
 
         // block_ledger_change
@@ -160,7 +172,7 @@ impl SerializeCompact for ExportActiveBlock {
                 })?;
         res.extend(block_ledger_change_count.to_varint_bytes());
         for (addr, change) in self.block_ledger_changes.0.iter() {
-            res.extend(&addr.to_bytes());
+            res.extend(addr.to_bytes());
             res.extend(change.to_bytes_compact()?);
         }
 
@@ -169,9 +181,11 @@ impl SerializeCompact for ExportActiveBlock {
             ModelsError::SerializeError(format!("too many roll updates in ActiveBlock: {}", err))
         })?;
         res.extend(roll_updates_count.to_varint_bytes());
+        // TODO: Temp before serialization is everywhere
+        let roll_updates_serializer = RollUpdateSerializer::new();
         for (addr, roll_update) in self.roll_updates.0.iter() {
             res.extend(addr.to_bytes());
-            res.extend(roll_update.to_bytes_compact()?);
+            roll_updates_serializer.serialize(roll_update, &mut res)?;
         }
 
         // creation events
@@ -212,8 +226,9 @@ impl DeserializeCompact for ExportActiveBlock {
         let is_final = is_final_u8 != 0;
 
         // block
-        let (block, delta) = Block::from_bytes_compact(&buffer[cursor..])?;
-        cursor += delta;
+        let (rest, block): (&[u8], WrappedBlock) =
+            WrappedDeserializer::new(BlockDeserializer::new()).deserialize(&buffer[cursor..])?;
+        cursor += buffer[cursor..].len() - rest.len();
 
         // parents
         let has_parents = u8_from_slice(&buffer[cursor..])?;
@@ -221,7 +236,7 @@ impl DeserializeCompact for ExportActiveBlock {
         let parents = if has_parents == 1 {
             let mut parents: Vec<(BlockId, u64)> = Vec::with_capacity(parent_count as usize);
             for _ in 0..parent_count {
-                let parent_h = BlockId::from_bytes(&array_from_slice(&buffer[cursor..])?)?;
+                let parent_h = BlockId::from_bytes(&array_from_slice(&buffer[cursor..])?);
                 cursor += BLOCK_ID_SIZE_BYTES;
                 let (period, delta) = u64::from_varint_bytes(&buffer[cursor..])?;
                 cursor += delta;
@@ -258,7 +273,7 @@ impl DeserializeCompact for ExportActiveBlock {
             let mut map: Map<BlockId, u64> =
                 Map::with_capacity_and_hasher(map_count as usize, BuildMap::default());
             for _ in 0..(map_count as usize) {
-                let hash = BlockId::from_bytes(&array_from_slice(&buffer[cursor..])?)?;
+                let hash = BlockId::from_bytes(&array_from_slice(&buffer[cursor..])?);
                 cursor += BLOCK_ID_SIZE_BYTES;
                 let (period, delta) = u64::from_varint_bytes(&buffer[cursor..])?;
                 cursor += delta;
@@ -280,7 +295,7 @@ impl DeserializeCompact for ExportActiveBlock {
             BuildMap::default(),
         );
         for _ in 0..(dependencies_count as usize) {
-            let dep = BlockId::from_bytes(&array_from_slice(&buffer[cursor..])?)?;
+            let dep = BlockId::from_bytes(&array_from_slice(&buffer[cursor..])?);
             cursor += BLOCK_ID_SIZE_BYTES;
             dependencies.insert(dep);
         }
@@ -294,7 +309,7 @@ impl DeserializeCompact for ExportActiveBlock {
             BuildMap::default(),
         ));
         for _ in 0..block_ledger_change_count {
-            let address = Address::from_bytes(&array_from_slice(&buffer[cursor..])?)?;
+            let address = Address::from_bytes(&array_from_slice(&buffer[cursor..])?);
             cursor += ADDRESS_SIZE_BYTES;
             let (change, delta) = LedgerChange::from_bytes_compact(&buffer[cursor..])?;
             cursor += delta;
@@ -313,11 +328,19 @@ impl DeserializeCompact for ExportActiveBlock {
             roll_updates_count as usize,
             BuildMap::default(),
         ));
+        // TODO: Temp before serialization is everywhere
+        let roll_update_deserializer = RollUpdateDeserializer::new();
         for _ in 0..roll_updates_count {
-            let address = Address::from_bytes(&array_from_slice(&buffer[cursor..])?)?;
+            let address = Address::from_bytes(&array_from_slice(&buffer[cursor..])?);
             cursor += ADDRESS_SIZE_BYTES;
-            let (roll_update, delta) = RollUpdate::from_bytes_compact(&buffer[cursor..])?;
-            cursor += delta;
+            let (rest, roll_update) = roll_update_deserializer
+                .deserialize::<DeserializeError>(&buffer[cursor..])
+                .map_err(|_| {
+                    ModelsError::DeserializeError(
+                        "Error while deserializing roll_update".to_string(),
+                    )
+                })?;
+            cursor += buffer[cursor..].len() - rest.len();
             roll_updates.0.insert(address, roll_update);
         }
 
@@ -330,7 +353,7 @@ impl DeserializeCompact for ExportActiveBlock {
         for _ in 0..production_events_count {
             let (period, delta) = u64::from_varint_bytes(&buffer[cursor..])?;
             cursor += delta;
-            let address = Address::from_bytes(&array_from_slice(&buffer[cursor..])?)?;
+            let address = Address::from_bytes(&array_from_slice(&buffer[cursor..])?);
             cursor += ADDRESS_SIZE_BYTES;
             let has_created = match u8_from_slice(&buffer[cursor..])? {
                 0u8 => false,
@@ -348,6 +371,7 @@ impl DeserializeCompact for ExportActiveBlock {
         Ok((
             ExportActiveBlock {
                 is_final,
+                block_id: block.id,
                 block,
                 parents,
                 children,

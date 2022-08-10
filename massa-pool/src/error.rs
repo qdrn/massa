@@ -5,6 +5,7 @@ use massa_models::ModelsError;
 use massa_protocol_exports::ProtocolError;
 use thiserror::Error;
 
+/// pool error
 #[non_exhaustive]
 #[derive(Display, Error, Debug)]
 pub enum PoolError {
@@ -18,6 +19,8 @@ pub enum PoolError {
     JoinError(#[from] tokio::task::JoinError),
     /// models error: {0}
     ModelsError(#[from] ModelsError),
+    /// missing operation error: {0}
+    MissingOperation(String),
 }
 
 impl From<ProtocolError> for PoolError {

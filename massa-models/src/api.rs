@@ -3,31 +3,57 @@
 use crate::address::AddressCycleProductionStats;
 use crate::ledger_models::LedgerData;
 use crate::node::NodeId;
-use crate::prehash::Map;
 use crate::prehash::Set;
 use crate::stats::{ConsensusStats, NetworkStats, PoolStats};
+use crate::WrappedEndorsement;
+use crate::WrappedOperation;
 use crate::{
-    Address, Amount, Block, BlockId, CompactConfig, Endorsement, EndorsementId, Operation,
-    OperationId, Slot, Version,
+    Address, Amount, Block, BlockId, CompactConfig, EndorsementId, OperationId, Slot, Version,
 };
-use massa_hash::hash::Hash;
+use massa_signature::{PublicKey, Signature};
 use massa_time::MassaTime;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
-use std::net::{IpAddr, SocketAddr};
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::net::IpAddr;
+use std::str::FromStr;
+
+/// operation input
+#[derive(Serialize, Deserialize, Debug)]
+pub struct OperationInput {
+    /// The public key of the creator of the TX
+    pub creator_public_key: PublicKey,
+    /// The signature of the operation
+    pub signature: Signature,
+    /// The serialized version of the content base58 encoded
+    pub serialized_content: Vec<u8>,
+}
+
+/// node status
 #[derive(Debug, Deserialize, Serialize)]
 pub struct NodeStatus {
+    /// our node id
     pub node_id: NodeId,
+    /// optional node ip
     pub node_ip: Option<IpAddr>,
+    /// node version
     pub version: Version,
+    /// now
     pub current_time: MassaTime,
+    /// current cycle
     pub current_cycle: u64,
-    pub connected_nodes: HashMap<NodeId, IpAddr>,
+    /// connected nodes (node id, ip address, true if the connection is outgoing, false if incoming)
+    pub connected_nodes: HashMap<NodeId, (IpAddr, bool)>,
+    /// latest slot, none if now is before genesis timestamp
     pub last_slot: Option<Slot>,
+    /// next slot
     pub next_slot: Slot,
+    /// consensus stats
     pub consensus_stats: ConsensusStats,
+    /// pool stats
     pub pool_stats: PoolStats,
+    /// network stats
     pub network_stats: NetworkStats,
+    /// compact configuration
     pub config: CompactConfig,
 }
 
@@ -60,23 +86,38 @@ impl std::fmt::Display for NodeStatus {
         writeln!(f, "{}", self.network_stats)?;
 
         writeln!(f, "Connected nodes:")?;
-        for (node_id, ip_addr) in &self.connected_nodes {
-            writeln!(f, "\tNode's ID: {} / IP address: {}", node_id, ip_addr)?;
+        for (node_id, (ip_addr, is_outgoing)) in &self.connected_nodes {
+            writeln!(
+                f,
+                "Node's ID: {} / IP address: {} / {} connection",
+                node_id,
+                ip_addr,
+                if *is_outgoing { "Out" } else { "In" }
+            )?
         }
         Ok(())
     }
 }
 
+/// Operation and contextual info about it
 #[derive(Debug, Deserialize, Serialize)]
 pub struct OperationInfo {
+    /// id
     pub id: OperationId,
+    /// true if operation is still in pool
     pub in_pool: bool,
+    /// the operation appears in `in_blocks`
+    /// if it appears in multiple blocks, these blocks are in different cliques
     pub in_blocks: Vec<BlockId>,
+    /// true if the operation is final (for example in a final block)
     pub is_final: bool,
-    pub operation: Operation,
+    /// the operation itself
+    pub operation: WrappedOperation,
 }
 
 impl OperationInfo {
+    /// extend an operation info with another one
+    /// There is not check to see if the id and operation are indeed the same
     pub fn extend(&mut self, other: &OperationInfo) {
         self.in_pool = self.in_pool || other.in_pool;
         self.in_blocks.extend(other.in_blocks.iter());
@@ -102,10 +143,14 @@ impl std::fmt::Display for OperationInfo {
     }
 }
 
+/// Current Parallel balance ledger info
 #[derive(Debug, Deserialize, Serialize, Clone, Copy)]
 pub struct LedgerInfo {
+    /// final data
     pub final_ledger_info: LedgerData,
+    /// latest data
     pub candidate_ledger_info: LedgerData,
+    /// locked balance, for example balance due to a roll sell
     pub locked_balance: Amount,
 }
 
@@ -122,10 +167,14 @@ impl std::fmt::Display for LedgerInfo {
     }
 }
 
+/// Roll counts
 #[derive(Debug, Deserialize, Serialize, Clone, Copy)]
 pub struct RollsInfo {
+    /// count taken into account for the current cycle
     pub active_rolls: u64,
+    /// at final blocks
     pub final_rolls: u64,
+    /// at latest blocks
     pub candidate_rolls: u64,
 }
 
@@ -138,33 +187,36 @@ impl std::fmt::Display for RollsInfo {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
-pub struct SCELedgerInfo {
-    pub balance: Amount,
-    pub module: Option<Vec<u8>>,
-    pub datastore: Map<Hash, Vec<u8>>,
-}
-
-impl std::fmt::Display for SCELedgerInfo {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, "\tBalance: {}", self.balance)?;
-        // I choose not to display neither the module nor the datastore because bytes
-        Ok(())
-    }
-}
-
+/// All you ever dream to know about an address
 #[derive(Debug, Deserialize, Serialize)]
 pub struct AddressInfo {
+    /// the address
     pub address: Address,
+    /// the thread it is in
     pub thread: u8,
+    /// parallel balance info
     pub ledger_info: LedgerInfo,
-    pub sce_ledger_info: SCELedgerInfo,
+    /// final sequential balance
+    pub final_balance_info: Option<Amount>,
+    /// latest sequential balance
+    pub candidate_balance_info: Option<Amount>,
+    /// every final datastore key
+    pub final_datastore_keys: BTreeSet<Vec<u8>>,
+    /// every candidate datastore key
+    pub candidate_datastore_keys: BTreeSet<Vec<u8>>,
+    /// rolls
     pub rolls: RollsInfo,
+    /// next slots this address will be selected to create a block
     pub block_draws: HashSet<Slot>,
+    /// next slots this address will be selected to create a endorsement
     pub endorsement_draws: HashSet<IndexedSlot>,
+    /// created blocks ids
     pub blocks_created: Set<BlockId>,
+    /// endorsements in which this address is involved (endorser, block creator)
     pub involved_in_endorsements: Set<EndorsementId>,
+    /// operation in which this address is involved (sender or receiver)
     pub involved_in_operations: Set<OperationId>,
+    /// stats about block production
     pub production_stats: Vec<AddressCycleProductionStats>,
 }
 
@@ -173,8 +225,26 @@ impl std::fmt::Display for AddressInfo {
         writeln!(f, "Address: {}", self.address)?;
         writeln!(f, "Thread: {}", self.thread)?;
         writeln!(f, "Sequential balance:\n{}", self.ledger_info)?;
-        writeln!(f, "Parallel balance:\n{}", self.sce_ledger_info)?;
+        writeln!(f, "Parallel balance:",)?;
+        writeln!(f, "\tFinal: {:?}", self.final_balance_info)?;
+        writeln!(f, "\tCandidate: {:?}\n", self.candidate_balance_info)?;
         writeln!(f, "Rolls:\n{}", self.rolls)?;
+        writeln!(
+            f,
+            "Final datastore keys (UTF-8):\n{:?}\n",
+            self.final_datastore_keys
+                .iter()
+                .map(|v| std::str::from_utf8(v).unwrap_or("(non-utf8 key)"))
+                .collect::<Vec<&str>>()
+        )?;
+        writeln!(
+            f,
+            "Candidate datastore keys (UTF-8):\n{:?}\n",
+            self.candidate_datastore_keys
+                .iter()
+                .map(|v| std::str::from_utf8(v).unwrap_or("(non-utf8 key)"))
+                .collect::<Vec<&str>>()
+        )?;
         writeln!(
             f,
             "Block draws: {}",
@@ -233,13 +303,15 @@ impl std::fmt::Display for AddressInfo {
 }
 
 impl AddressInfo {
+    /// Only essential info about an address
     pub fn compact(&self) -> CompactAddressInfo {
         CompactAddressInfo {
             address: self.address,
             thread: self.thread,
             balance: self.ledger_info,
             rolls: self.rolls,
-            sce_balance: self.sce_ledger_info.clone(),
+            final_balance: self.final_balance_info,
+            candidate_balance: self.candidate_balance_info,
         }
     }
 }
@@ -247,7 +319,9 @@ impl AddressInfo {
 /// When an address is drawn to create an endorsement it is selected for a specific index
 #[derive(Debug, Deserialize, Serialize, Hash, PartialEq, Eq)]
 pub struct IndexedSlot {
+    /// slot
     pub slot: Slot,
+    /// endorsement index in the slot
     pub index: usize,
 }
 
@@ -257,33 +331,59 @@ impl std::fmt::Display for IndexedSlot {
     }
 }
 
-#[derive(Serialize)]
+/// Less information about an address
+#[derive(Debug, Serialize)]
 pub struct CompactAddressInfo {
+    /// the address
     pub address: Address,
+    /// the thread it is
     pub thread: u8,
+    /// parallel balance
     pub balance: LedgerInfo,
+    /// rolls
     pub rolls: RollsInfo,
-    pub sce_balance: SCELedgerInfo,
+    /// final sequential balance
+    pub final_balance: Option<Amount>,
+    /// latest sequential balance
+    pub candidate_balance: Option<Amount>,
 }
 
 impl std::fmt::Display for CompactAddressInfo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "Address: {}", self.address)?;
         writeln!(f, "Thread: {}", self.thread)?;
-        writeln!(f, "Sequential balance:\n{}", self.sce_balance)?;
-        writeln!(f, "Parallel balance:\n{}", self.balance)?;
+        writeln!(f, "Parallel balance:",)?;
+        writeln!(
+            f,
+            "\tFinal: {:?}",
+            self.final_balance
+                .unwrap_or(Amount::from_str("0").map_err(|_| std::fmt::Error)?)
+        )?;
+        writeln!(
+            f,
+            "\tCandidate: {:?}\n",
+            self.candidate_balance
+                .unwrap_or(Amount::from_str("0").map_err(|_| std::fmt::Error)?)
+        )?;
+        writeln!(f, "Sequential balance:\n{}", self.balance)?;
         writeln!(f, "Rolls:\n{}", self.rolls)?;
         Ok(())
     }
 }
 
+/// All you wanna know about an endorsement
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct EndorsementInfo {
+    /// the id
     pub id: EndorsementId,
+    /// true is the endorsement is still in pool
     pub in_pool: bool,
+    /// endorsements included in these blocks
     pub in_blocks: Vec<BlockId>,
+    /// true included in a final block
     pub is_final: bool,
-    pub endorsement: Endorsement,
+    /// The full endorsement
+    pub endorsement: WrappedEndorsement,
 }
 
 impl std::fmt::Display for EndorsementInfo {
@@ -303,17 +403,25 @@ impl std::fmt::Display for EndorsementInfo {
     }
 }
 
+/// refactor to delete
 #[derive(Debug, Deserialize, Serialize)]
 pub struct BlockInfo {
+    /// block id
     pub id: BlockId,
+    /// optional block info content
     pub content: Option<BlockInfoContent>,
 }
 
+/// Block content
 #[derive(Debug, Deserialize, Serialize)]
 pub struct BlockInfoContent {
+    /// true if final
     pub is_final: bool,
+    /// true if incompatible with a final block
     pub is_stale: bool,
+    /// true if in the greatest clique
     pub is_in_blockclique: bool,
+    /// block
     pub block: Block,
 }
 
@@ -336,14 +444,22 @@ impl std::fmt::Display for BlockInfo {
     }
 }
 
+/// A block resume (without the block itself)
 #[derive(Debug, Deserialize, Serialize)]
 pub struct BlockSummary {
+    /// id
     pub id: BlockId,
+    /// true if in a final block
     pub is_final: bool,
+    /// true if incompatible with a final block
     pub is_stale: bool,
+    /// true if in the greatest block clique
     pub is_in_blockclique: bool,
+    /// the slot the block is in
     pub slot: Slot,
+    /// the block creator
     pub creator: Address,
+    /// the block parents
     pub parents: Vec<BlockId>,
 }
 
@@ -376,33 +492,82 @@ fn display_if_true(value: bool, text: &str) -> String {
     }
 }
 
+/// Just a wrapper with a optional beginning and end
 #[derive(Debug, Deserialize, Clone, Copy, Serialize)]
 pub struct TimeInterval {
+    /// optional start slot
     pub start: Option<MassaTime>,
+    /// optional end slot
     pub end: Option<MassaTime>,
 }
 
-#[derive(Debug, Deserialize, Clone, Copy)]
-pub struct APISettings {
-    pub draw_lookahead_period_count: u64,
-    pub bind_private: SocketAddr,
-    pub bind_public: SocketAddr,
-    pub max_arguments: u64,
+/// Datastore entry query input struct
+#[derive(Debug, Deserialize, Clone, Serialize)]
+pub struct DatastoreEntryInput {
+    /// associated address of the entry
+    pub address: Address,
+    /// datastore key
+    pub key: Vec<u8>,
 }
 
+/// Datastore entry query output struct
 #[derive(Debug, Deserialize, Clone, Serialize)]
+pub struct DatastoreEntryOutput {
+    /// final datastore entry value
+    pub final_value: Option<Vec<u8>>,
+    /// candidate datastore entry value
+    pub candidate_value: Option<Vec<u8>>,
+}
+
+impl std::fmt::Display for DatastoreEntryOutput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "final value: {:?}", self.final_value)?;
+        writeln!(f, "candidate value: {:?}", self.candidate_value)?;
+        Ok(())
+    }
+}
+
+/// filter used when retrieving SC output events
+#[derive(Default, Debug, Deserialize, Clone, Serialize)]
 pub struct EventFilter {
+    /// optional start slot
     pub start: Option<Slot>,
+    /// optional end slot
     pub end: Option<Slot>,
+    /// optional emitter address
     pub emitter_address: Option<Address>,
+    /// optional caller address
     pub original_caller_address: Option<Address>,
+    /// optional operation id
     pub original_operation_id: Option<OperationId>,
 }
 
+/// read only bytecode execution request
 #[derive(Debug, Deserialize, Clone, Serialize)]
-pub struct ReadOnlyExecution {
+pub struct ReadOnlyBytecodeExecution {
+    /// max available gas
     pub max_gas: u64,
+    /// gas price
     pub simulated_gas_price: Amount,
+    /// byte code
     pub bytecode: Vec<u8>,
+    /// caller's address, optional
     pub address: Option<Address>,
+}
+
+/// read SC call request
+#[derive(Debug, Deserialize, Clone, Serialize)]
+pub struct ReadOnlyCall {
+    /// max available gas
+    pub max_gas: u64,
+    /// gas price
+    pub simulated_gas_price: Amount,
+    /// target address
+    pub target_address: Address,
+    /// target function
+    pub target_function: String,
+    /// function parameter
+    pub parameter: String,
+    /// caller's address, optional
+    pub caller_address: Option<Address>,
 }

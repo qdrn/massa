@@ -1,20 +1,29 @@
 // Copyright (c) 2022 MASSA LABS <info@massa.net>
 #![allow(clippy::too_many_arguments)]
 use crate::error::ApiError;
+use crate::settings::APISettings;
 use crate::{Endpoints, Public, RpcServer, StopHandle, API};
 use futures::{stream::FuturesUnordered, StreamExt};
 use jsonrpc_core::BoxFuture;
 use massa_consensus_exports::{ConsensusCommandSender, ConsensusConfig};
 use massa_execution_exports::{
-    ExecutionController, ExecutionStackElement, ReadOnlyExecutionRequest,
+    ExecutionController, ExecutionStackElement, ReadOnlyExecutionRequest, ReadOnlyExecutionTarget,
 };
 use massa_graph::{DiscardReason, ExportBlockStatus};
-use massa_models::api::SCELedgerInfo;
+use massa_models::api::{
+    DatastoreEntryInput, DatastoreEntryOutput, OperationInput, ReadOnlyBytecodeExecution,
+    ReadOnlyCall,
+};
 use massa_models::execution::ReadOnlyResult;
+use massa_models::operation::OperationDeserializer;
+use massa_models::wrapped::WrappedDeserializer;
+use massa_models::{Amount, ModelsError, WrappedOperation};
+use massa_serialization::{DeserializeError, Deserializer};
+
 use massa_models::{
     api::{
-        APISettings, AddressInfo, BlockInfo, BlockInfoContent, BlockSummary, EndorsementInfo,
-        EventFilter, IndexedSlot, NodeStatus, OperationInfo, ReadOnlyExecution, TimeInterval,
+        AddressInfo, BlockInfo, BlockInfoContent, BlockSummary, EndorsementInfo, EventFilter,
+        IndexedSlot, NodeStatus, OperationInfo, TimeInterval,
     },
     clique::Clique,
     composite::PubkeySig,
@@ -23,15 +32,17 @@ use massa_models::{
     output_event::SCOutputEvent,
     prehash::{BuildMap, Map, Set},
     timeslots::{get_latest_block_slot_at_timestamp, time_range_to_slot_range},
-    Address, BlockId, CompactConfig, EndorsementId, Operation, OperationId, Slot, Version,
+    Address, BlockId, CompactConfig, EndorsementId, OperationId, Slot, Version,
 };
-use massa_network::{NetworkCommandSender, NetworkSettings};
+use massa_network_exports::{NetworkCommandSender, NetworkSettings};
 use massa_pool::PoolCommandSender;
-use massa_signature::{derive_public_key, generate_random_private_key, PrivateKey};
+use massa_signature::KeyPair;
 use massa_time::MassaTime;
+use std::collections::BTreeSet;
 use std::net::{IpAddr, SocketAddr};
 
 impl API<Public> {
+    /// generate a new public API
     pub fn new(
         consensus_command_sender: ConsensusCommandSender,
         execution_controller: Box<dyn ExecutionController>,
@@ -75,22 +86,22 @@ impl Endpoints for API<Public> {
         crate::wrong_api::<PubkeySig>()
     }
 
-    fn add_staking_private_keys(&self, _: Vec<PrivateKey>) -> BoxFuture<Result<(), ApiError>> {
+    fn add_staking_secret_keys(&self, _: Vec<KeyPair>) -> BoxFuture<Result<(), ApiError>> {
         crate::wrong_api::<()>()
     }
 
-    fn execute_read_only_request(
+    fn execute_read_only_bytecode(
         &self,
-        reqs: Vec<ReadOnlyExecution>,
+        reqs: Vec<ReadOnlyBytecodeExecution>,
     ) -> BoxFuture<Result<Vec<ExecuteReadOnlyResponse>, ApiError>> {
-        if reqs.len() > self.0.api_settings.max_arguments as usize {
+        if reqs.len() as u64 > self.0.api_settings.max_arguments {
             let closure =
                 async move || Err(ApiError::TooManyArguments("too many arguments".into()));
             return Box::pin(closure());
         }
 
         let mut res: Vec<ExecuteReadOnlyResponse> = Vec::with_capacity(reqs.len());
-        for ReadOnlyExecution {
+        for ReadOnlyBytecodeExecution {
             max_gas,
             address,
             simulated_gas_price,
@@ -99,7 +110,7 @@ impl Endpoints for API<Public> {
         {
             let address = address.unwrap_or_else(|| {
                 // if no addr provided, use a random one
-                Address::from_public_key(&derive_public_key(&generate_random_private_key()))
+                Address::from_public_key(&KeyPair::generate().get_public_key())
             });
 
             // TODO:
@@ -111,7 +122,7 @@ impl Endpoints for API<Public> {
             let req = ReadOnlyExecutionRequest {
                 max_gas,
                 simulated_gas_price,
-                bytecode,
+                target: ReadOnlyExecutionTarget::BytecodeExecution(bytecode),
                 call_stack: vec![ExecutionStackElement {
                     address,
                     coins: Default::default(),
@@ -129,7 +140,81 @@ impl Endpoints for API<Public> {
                     |err| ReadOnlyResult::Error(format!("readonly call failed: {}", err)),
                     |_| ReadOnlyResult::Ok,
                 ),
-                output_events: result.map_or_else(|_| Default::default(), |v| v.events.export()),
+                output_events: result.map_or_else(|_| Default::default(), |mut v| v.events.take()),
+            };
+
+            res.push(result);
+        }
+
+        // return result
+        let closure = async move || Ok(res);
+        Box::pin(closure())
+    }
+
+    fn execute_read_only_call(
+        &self,
+        reqs: Vec<ReadOnlyCall>,
+    ) -> BoxFuture<Result<Vec<ExecuteReadOnlyResponse>, ApiError>> {
+        if reqs.len() as u64 > self.0.api_settings.max_arguments {
+            let closure =
+                async move || Err(ApiError::TooManyArguments("too many arguments".into()));
+            return Box::pin(closure());
+        }
+
+        let mut res: Vec<ExecuteReadOnlyResponse> = Vec::with_capacity(reqs.len());
+        for ReadOnlyCall {
+            max_gas,
+            simulated_gas_price,
+            target_address,
+            target_function,
+            parameter,
+            caller_address,
+        } in reqs
+        {
+            let caller_address = caller_address.unwrap_or_else(|| {
+                // if no addr provided, use a random one
+                Address::from_public_key(&KeyPair::generate().get_public_key())
+            });
+
+            // TODO:
+            // * set a maximum gas value for read-only executions to prevent attacks
+            // * stop mapping request and result, reuse execution's structures
+            // * remove async stuff
+
+            // translate request
+            let req = ReadOnlyExecutionRequest {
+                max_gas,
+                simulated_gas_price,
+                target: ReadOnlyExecutionTarget::FunctionCall {
+                    target_func: target_function,
+                    target_addr: target_address,
+                    parameter,
+                },
+                call_stack: vec![
+                    ExecutionStackElement {
+                        address: caller_address,
+                        coins: Default::default(),
+                        owned_addresses: vec![caller_address],
+                    },
+                    ExecutionStackElement {
+                        address: target_address,
+                        coins: Default::default(),
+                        owned_addresses: vec![target_address],
+                    },
+                ],
+            };
+
+            // run
+            let result = self.0.execution_controller.execute_readonly_request(req);
+
+            // map result
+            let result = ExecuteReadOnlyResponse {
+                executed_at: result.as_ref().map_or_else(|_| Slot::new(0, 0), |v| v.slot),
+                result: result.as_ref().map_or_else(
+                    |err| ReadOnlyResult::Error(format!("readonly call failed: {}", err)),
+                    |_| ReadOnlyResult::Ok,
+                ),
+                output_events: result.map_or_else(|_| Default::default(), |mut v| v.events.take()),
             };
 
             res.push(result);
@@ -148,11 +233,19 @@ impl Endpoints for API<Public> {
         crate::wrong_api::<Set<Address>>()
     }
 
-    fn ban(&self, _: Vec<IpAddr>) -> BoxFuture<Result<(), ApiError>> {
+    fn node_ban_by_ip(&self, _: Vec<IpAddr>) -> BoxFuture<Result<(), ApiError>> {
         crate::wrong_api::<()>()
     }
 
-    fn unban(&self, _: Vec<IpAddr>) -> BoxFuture<Result<(), ApiError>> {
+    fn node_ban_by_id(&self, _: Vec<NodeId>) -> BoxFuture<Result<(), ApiError>> {
+        crate::wrong_api::<()>()
+    }
+
+    fn node_unban_by_ip(&self, _: Vec<IpAddr>) -> BoxFuture<Result<(), ApiError>> {
+        crate::wrong_api::<()>()
+    }
+
+    fn node_unban_by_id(&self, _: Vec<NodeId>) -> BoxFuture<Result<(), ApiError>> {
         crate::wrong_api::<()>()
     }
 
@@ -189,7 +282,11 @@ impl Endpoints for API<Public> {
                 connected_nodes: peers?
                     .peers
                     .iter()
-                    .flat_map(|(ip, peer)| peer.active_nodes.iter().map(move |(id, _)| (*id, *ip)))
+                    .flat_map(|(ip, peer)| {
+                        peer.active_nodes
+                            .iter()
+                            .map(move |(id, is_outgoing)| (*id, (*ip, *is_outgoing)))
+                    })
                     .collect(),
                 last_slot,
                 next_slot: last_slot
@@ -214,9 +311,14 @@ impl Endpoints for API<Public> {
         Box::pin(closure())
     }
 
-    fn get_stakers(&self) -> BoxFuture<Result<Map<Address, u64>, ApiError>> {
+    fn get_stakers(&self) -> BoxFuture<Result<Vec<(Address, u64)>, ApiError>> {
         let consensus_command_sender = self.0.consensus_command_sender.clone();
-        let closure = async move || Ok(consensus_command_sender.get_active_stakers().await?);
+        let closure = async move || {
+            let stakers = consensus_command_sender.get_active_stakers().await?;
+            let mut staker_vec = Vec::from_iter(stakers);
+            staker_vec.sort_by(|&(_, a), &(_, b)| b.cmp(&a));
+            Ok(staker_vec)
+        };
         Box::pin(closure())
     }
 
@@ -289,9 +391,13 @@ impl Endpoints for API<Public> {
         &self,
         eds: Vec<EndorsementId>,
     ) -> BoxFuture<Result<Vec<EndorsementInfo>, ApiError>> {
+        let api_cfg = self.0.api_settings;
         let consensus_command_sender = self.0.consensus_command_sender.clone();
         let pool_command_sender = self.0.pool_command_sender.clone();
         let closure = async move || {
+            if eds.len() as u64 > api_cfg.max_arguments {
+                return Err(ApiError::TooManyArguments("too many arguments".into()));
+            }
             let mapped: Set<EndorsementId> = eds.into_iter().collect();
             let mut res = consensus_command_sender
                 .get_endorsements_by_id(mapped.clone())
@@ -383,7 +489,7 @@ impl Endpoints for API<Public> {
                     is_stale: false,
                     is_in_blockclique: blockclique.block_ids.contains(&id),
                     slot: exported_block.header.content.slot,
-                    creator: Address::from_public_key(&exported_block.header.content.creator),
+                    creator: exported_block.header.creator_address,
                     parents: exported_block.header.content.parents,
                 });
             }
@@ -395,12 +501,35 @@ impl Endpoints for API<Public> {
                         is_stale: true,
                         is_in_blockclique: false,
                         slot: header.content.slot,
-                        creator: Address::from_public_key(&header.content.creator),
+                        creator: header.creator_address,
                         parents: header.content.parents,
                     });
                 }
             }
             Ok(res)
+        };
+        Box::pin(closure())
+    }
+
+    fn get_datastore_entries(
+        &self,
+        entries: Vec<DatastoreEntryInput>,
+    ) -> BoxFuture<Result<Vec<DatastoreEntryOutput>, ApiError>> {
+        let execution_controller = self.0.execution_controller.clone();
+        let closure = async move || {
+            Ok(execution_controller
+                .get_final_and_active_data_entry(
+                    entries
+                        .into_iter()
+                        .map(|input| (input.address, input.key))
+                        .collect::<Vec<_>>(),
+                )
+                .into_iter()
+                .map(|output| DatastoreEntryOutput {
+                    final_value: output.0,
+                    candidate_value: output.1,
+                })
+                .collect())
         };
         Box::pin(closure())
     }
@@ -413,41 +542,16 @@ impl Endpoints for API<Public> {
         let cfg = self.0.consensus_config.clone();
         let api_cfg = self.0.api_settings;
         let pool_command_sender = self.0.pool_command_sender.clone();
+        let execution_controller = self.0.execution_controller.clone();
         let compensation_millis = self.0.compensation_millis;
 
-        // todo make better use of SCE ledger info
-
-        // map SCE ledger info and check for address length
-        let sce_ledger_info = if addresses.len() as u64 > api_cfg.max_arguments {
-            Err(ApiError::TooManyArguments("too many arguments".into()))
-        } else {
-            // get SCE ledger info
-            let mut sce_ledger_info: Map<Address, SCELedgerInfo> =
-                Map::with_capacity_and_hasher(addresses.len(), BuildMap::default());
-            for addr in &addresses {
-                let active_entry = match self
-                    .0
-                    .execution_controller
-                    .get_final_and_active_ledger_entry(addr)
-                    .1
-                {
-                    None => continue,
-                    Some(v) => SCELedgerInfo {
-                        balance: v.parallel_balance,
-                        module: Some(v.bytecode),
-                        datastore: v.datastore.into_iter().collect(),
-                    },
-                };
-                sce_ledger_info.insert(*addr, active_entry);
-            }
-            Ok(sce_ledger_info)
-        };
-
         let closure = async move || {
-            let sce_ledger_info = sce_ledger_info?;
-
             let mut res = Vec::with_capacity(addresses.len());
 
+            // check for address length
+            if addresses.len() as u64 > api_cfg.max_arguments {
+                return Err(ApiError::TooManyArguments("too many arguments".into()));
+            }
             // next draws info
             let now = MassaTime::compensated_now(compensation_millis)?;
             let current_slot = get_latest_block_slot_at_timestamp(
@@ -479,17 +583,27 @@ impl Endpoints for API<Public> {
                 Map::with_capacity_and_hasher(addresses.len(), BuildMap::default());
             let mut endorsements: Map<Address, Set<EndorsementId>> =
                 Map::with_capacity_and_hasher(addresses.len(), BuildMap::default());
+            let mut final_balance_info: Map<Address, Option<Amount>> =
+                Map::with_capacity_and_hasher(addresses.len(), BuildMap::default());
+            let mut candidate_balance_info: Map<Address, Option<Amount>> =
+                Map::with_capacity_and_hasher(addresses.len(), BuildMap::default());
+            let mut final_datastore_keys: Map<Address, BTreeSet<Vec<u8>>> =
+                Map::with_capacity_and_hasher(addresses.len(), BuildMap::default());
+            let mut candidate_datastore_keys: Map<Address, BTreeSet<Vec<u8>>> =
+                Map::with_capacity_and_hasher(addresses.len(), BuildMap::default());
 
             let mut concurrent_getters = FuturesUnordered::new();
             for &address in addresses.iter() {
                 let mut pool_cmd_snd = pool_command_sender.clone();
                 let cmd_snd = cmd_sender.clone();
+                let exec_snd = execution_controller.clone();
                 concurrent_getters.push(async move {
                     let blocks = cmd_snd
                         .get_block_ids_by_creator(address)
                         .await?
                         .into_keys()
                         .collect::<Set<BlockId>>();
+
                     let get_pool_ops = pool_cmd_snd.get_operations_involving_address(address);
                     let get_consensus_ops = cmd_snd.get_operations_involving_address(address);
                     let (get_pool_ops, get_consensus_ops) =
@@ -499,24 +613,62 @@ impl Endpoints for API<Public> {
                         .chain(get_consensus_ops?.into_keys())
                         .collect();
 
-                        let get_pool_eds = pool_cmd_snd.get_endorsements_by_address(address);
-                        let get_consensus_eds = cmd_snd.get_endorsements_by_address(address);
-                        let (get_pool_eds, get_consensus_eds) =
-                            tokio::join!(get_pool_eds, get_consensus_eds);
-                        let gathered_ed: Set<EndorsementId> = get_pool_eds?
-                            .into_keys()
-                            .chain(get_consensus_eds?.into_keys())
-                            .collect();
-                    Result::<(Address, Set<BlockId>, Set<OperationId>, Set<EndorsementId>), ApiError>::Ok((
-                        address, blocks, gathered, gathered_ed
+                    let get_pool_eds = pool_cmd_snd.get_endorsements_by_address(address);
+                    let get_consensus_eds = cmd_snd.get_endorsements_by_address(address);
+                    let (get_pool_eds, get_consensus_eds) =
+                        tokio::join!(get_pool_eds, get_consensus_eds);
+                    let gathered_ed: Set<EndorsementId> = get_pool_eds?
+                        .into_keys()
+                        .chain(get_consensus_eds?.into_keys())
+                        .collect();
+
+                    let balances = exec_snd.get_final_and_active_parallel_balance(vec![address]);
+                    let balances_result = balances.first().unwrap();
+                    let (final_keys, candidate_keys) =
+                        exec_snd.get_final_and_active_datastore_keys(&address);
+
+                    Result::<
+                        (
+                            Address,
+                            Set<BlockId>,
+                            Set<OperationId>,
+                            Set<EndorsementId>,
+                            Option<Amount>,
+                            Option<Amount>,
+                            BTreeSet<Vec<u8>>,
+                            BTreeSet<Vec<u8>>,
+                        ),
+                        ApiError,
+                    >::Ok((
+                        address,
+                        blocks,
+                        gathered,
+                        gathered_ed,
+                        balances_result.0,
+                        balances_result.1,
+                        final_keys,
+                        candidate_keys,
                     ))
                 });
             }
             while let Some(res) = concurrent_getters.next().await {
-                let (a, bl_set, op_set, ed_set) = res?;
-                operations.insert(a, op_set);
-                blocks.insert(a, bl_set);
-                endorsements.insert(a, ed_set);
+                let (
+                    addr,
+                    block_set,
+                    operation_set,
+                    endorsement_set,
+                    final_balance,
+                    candidate_balance,
+                    final_keys,
+                    candidate_keys,
+                ) = res?;
+                blocks.insert(addr, block_set);
+                operations.insert(addr, operation_set);
+                endorsements.insert(addr, endorsement_set);
+                final_balance_info.insert(addr, final_balance);
+                candidate_balance_info.insert(addr, candidate_balance);
+                final_datastore_keys.insert(addr, final_keys);
+                candidate_datastore_keys.insert(addr, candidate_keys);
             }
 
             // compile everything per address
@@ -552,7 +704,18 @@ impl Endpoints for API<Public> {
                         .remove(&address)
                         .ok_or(ApiError::NotFound)?,
                     production_stats: state.production_stats,
-                    sce_ledger_info: sce_ledger_info.get(&address).cloned().unwrap_or_default(),
+                    final_balance_info: final_balance_info
+                        .remove(&address)
+                        .ok_or(ApiError::NotFound)?,
+                    candidate_balance_info: candidate_balance_info
+                        .remove(&address)
+                        .ok_or(ApiError::NotFound)?,
+                    final_datastore_keys: final_datastore_keys
+                        .remove(&address)
+                        .ok_or(ApiError::NotFound)?,
+                    candidate_datastore_keys: candidate_datastore_keys
+                        .remove(&address)
+                        .ok_or(ApiError::NotFound)?,
                 })
             }
             Ok(res)
@@ -562,7 +725,7 @@ impl Endpoints for API<Public> {
 
     fn send_operations(
         &self,
-        ops: Vec<Operation>,
+        ops: Vec<OperationInput>,
     ) -> BoxFuture<Result<Vec<OperationId>, ApiError>> {
         let mut cmd_sender = self.0.pool_command_sender.clone();
         let api_cfg = self.0.api_settings;
@@ -570,9 +733,31 @@ impl Endpoints for API<Public> {
             if ops.len() as u64 > api_cfg.max_arguments {
                 return Err(ApiError::TooManyArguments("too many arguments".into()));
             }
+            let operation_deserializer = WrappedDeserializer::new(OperationDeserializer::new());
             let to_send = ops
                 .into_iter()
-                .map(|op| Ok((op.verify_integrity()?, op)))
+                .map(|op_input| {
+                    let mut op_serialized = Vec::new();
+                    op_serialized.extend(op_input.signature.to_bytes());
+                    op_serialized.extend(op_input.creator_public_key.to_bytes());
+                    op_serialized.extend(op_input.serialized_content);
+                    let (rest, op): (&[u8], WrappedOperation) = operation_deserializer
+                        .deserialize::<DeserializeError>(&op_serialized)
+                        .map_err(|err| {
+                            ApiError::ModelsError(ModelsError::DeserializeError(err.to_string()))
+                        })?;
+                    if rest.is_empty() {
+                        Ok(op)
+                    } else {
+                        Err(ApiError::ModelsError(ModelsError::DeserializeError(
+                            "There is data left after operation deserialization".to_owned(),
+                        )))
+                    }
+                })
+                .map(|op| match op {
+                    Ok(operation) => Ok((operation.verify_integrity()?, operation)),
+                    Err(e) => Err(e),
+                })
                 .collect::<Result<Map<OperationId, _>, ApiError>>()?;
             let ids = to_send.keys().copied().collect();
             cmd_sender.add_operations(to_send).await?;
@@ -581,7 +766,7 @@ impl Endpoints for API<Public> {
         Box::pin(closure())
     }
 
-    /// Get events optionnally filtered by:
+    /// Get events optionally filtered by:
     /// * start slot
     /// * end slot
     /// * emitter address
@@ -589,25 +774,23 @@ impl Endpoints for API<Public> {
     /// * operation id
     fn get_filtered_sc_output_event(
         &self,
-        EventFilter {
-            start,
-            end,
-            emitter_address,
-            original_caller_address,
-            original_operation_id,
-        }: EventFilter,
+        filter: EventFilter,
     ) -> BoxFuture<Result<Vec<SCOutputEvent>, ApiError>> {
-        // get events
-        let events = self.0.execution_controller.get_filtered_sc_output_event(
-            start,
-            end,
-            emitter_address,
-            original_caller_address,
-            original_operation_id,
-        );
+        let events = self
+            .0
+            .execution_controller
+            .get_filtered_sc_output_event(filter);
 
-        // TODO get rid of the async part
+        // TODO: get rid of the async part
         let closure = async move || Ok(events);
         Box::pin(closure())
+    }
+
+    fn node_whitelist(&self, _: Vec<IpAddr>) -> BoxFuture<Result<(), ApiError>> {
+        crate::wrong_api::<()>()
+    }
+
+    fn node_remove_from_whitelist(&self, _: Vec<IpAddr>) -> BoxFuture<Result<(), ApiError>> {
+        crate::wrong_api::<()>()
     }
 }

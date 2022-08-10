@@ -16,16 +16,18 @@
 
 [execution]
     # max number of generated events kept in RAM
-    max_final_events = 100
+    max_final_events = 10000
     # maximum length of the read-only execution requests queue
     readonly_queue_length = 10
     # by how many milliseconds shoud the execution lag behind real time
     # higher values increase speculative execution lag but improve performance
-    cursor_delay = 0
+    cursor_delay = 2000
 
 [ledger]
     # path to the initial smart contract balance ledger
     initial_sce_ledger_path = "base_config/initial_sce_ledger.json"
+    # path to the disk ledger db directory
+    disk_ledger_path = "storage/ledger/rocks_db"
     # length of the changes history. Higher values allow bootstrapping nodes with slower connections
     final_history_length = 100
 
@@ -39,7 +41,7 @@
     # max number of blocks waiting for dependencies
     max_dependency_blocks = 2048
     # number of final periods that must be kept at all times (increase to more resilience to short network disconnections, high values will increase RAM usage.)
-    force_keep_final_periods = 30
+    force_keep_final_periods = 20
 
     # max number of batches of pool operations to scan when generating a block
     max_operations_fill_attempts = 102400
@@ -57,8 +59,8 @@
     # path to the initial consensus balance ledger
     initial_ledger_path = "base_config/initial_ledger.json"
 
-    # max millis to wait while sending an event before dropping it
-    max_send_wait = 500
+    # max milliseconds to wait while sending an event before dropping it
+    max_send_wait = 0
     # useless blocks are pruned every block_db_prune_interval ms
     block_db_prune_interval = 5000
 
@@ -67,7 +69,7 @@
     # number of cycles cached by the proof-of-stake selection system
     pos_draw_cached_cycles = 10
 
-    # path to your staking private keys (not encrypted)
+    # path to your staking keys (not encrypted)
     staking_keys_path = "config/staking_keys.json"
     # considered timespan for stats info
     stats_timespan = 60000
@@ -79,18 +81,33 @@
     message_timeout = 5000
     # timeout after whick we consider a node does not have the block we asked for
     ask_block_timeout = 10000
+    # max cache size for which blocks our node knows about
+    max_known_blocks_size = 1024
     # max cache size for which blocks a foreign node knows about
     max_node_known_blocks_size = 1024
     # max cache size for which blocks a foreign node asked for
     max_node_wanted_blocks_size = 1024
     # max number of blocks we can ask simultaneously per node
-    max_simultaneous_ask_blocks_per_node = 2048
-    # max millis to wait while sending an event before dropping it
-    max_send_wait = 500
+    max_simultaneous_ask_blocks_per_node = 128
+    # max milliseconds to wait while sending an event before dropping it
+    max_send_wait = 0
+    # max cache size for which operations your node knows about
+    max_known_ops_size = 200000
     # max cache size for which operations a foreign node knows about
-    max_known_ops_size = 10024
-    # max cache size for which endorsements a foreign node knows about
+    max_node_known_ops_size = 20000
+    # max cache size for which endorsements our node knows about
     max_known_endorsements_size = 1024
+    # max cache size for which endorsements a foreign node knows about
+    max_node_known_endorsements_size = 1024
+    # Maximum number of batches in the memory buffer.
+    # Dismiss the new batches if overflow
+    operation_batch_buffer_capacity = 10024
+    # Start processing batches in the buffer each `operation_batch_proc_period` in millisecond
+    operation_batch_proc_period = 500
+    # All operations asked are prune each `operation_asked_pruning_period` millisecond
+    asked_operations_pruning_period = 100000
+    # Max number of operation per message, same as network param but can be smaller
+    max_operations_per_message = 1024
 
 [network]
     # port on which to listen for protocol communication
@@ -105,25 +122,15 @@
     peers_file = "storage/peers.json"
     # path to the initial peers file
     initial_peers_file = "base_config/initial_peers.json"
-    # target number of connections to bootstrap nodes
-    target_bootstrap_connections = 1
-    # max number of simultaneous protocol connection attempts towards bootstrap nodes
-    max_out_bootstrap_connection_attempts = 1
-    # target number of non bootstrap outgoing connections
-    target_out_nonbootstrap_connections = 10
-    # max number of inbound non bootstrap connections
-    max_in_nonbootstrap_connections = 15
     # max number of inbound connections per ip
     max_in_connections_per_ip = 5
-    # max number of outgoing non bootstrap simultaneous connection attempts
-    max_out_nonbootstrap_connection_attempts = 10
     # max number of stored idle peers
     max_idle_peers = 10000
     # max number of stored banned peers
     max_banned_peers = 100
     # max number of advertized peers
     max_advertise_length = 10000
-    # peers are dumped to file every peers_file_dump_interval millis
+    # peers are dumped to file every peers_file_dump_interval milliseconds
     peers_file_dump_interval = 10000
     # max size of sent messages
     max_message_size = 1048576000
@@ -131,8 +138,8 @@
     message_timeout = 5000
     # interval in milliseconds for asking peer lists from peers we are connected to
     ask_peer_list_interval = 30000
-    # path to the node private key (not the staking key)
-    private_key_file = "config/node_privkey.key"
+    # path to the node key (not the staking key)
+    keypair_file = "config/node_privkey.key"
     # max number of asked blocks per message
     max_ask_blocks_per_message = 128
     # max number of operations per message
@@ -140,7 +147,7 @@
     # max number of endorsements per message
     max_endorsements_per_message = 1024
     # max milliseconds to wait while sending an event before dropping it
-    max_send_wait = 500
+    max_send_wait = 0
     # we forget we banned a node after ban_timeout milliseconds
     ban_timeout = 3600000
     # Timeout duration when in handshake we respond with a PeerList
@@ -149,37 +156,56 @@
     # Max number of in connection overflowed managed by the handshake
     # that send a list of peers
     max_in_connection_overflow = 100
+    # Read limitation for a connection in bytes per seconds
+    max_bytes_read = 20_000_000.0
+    # Write limitation for a connection in bytes per seconds
+    max_bytes_write = 20_000_000.0
+
+    [network.peer_types_config]
+    Standard = { target_out_connections = 10, max_out_attempts = 10, max_in_connections = 15}
+    Bootstrap = { target_out_connections = 1, max_out_attempts = 1, max_in_connections = 1}
+    WhiteListed = { target_out_connections = 2, max_out_attempts = 2, max_in_connections = 3}
 
 [bootstrap]
     # list of bootstrap (ip, node id)
     bootstrap_list = [
-        ["149.202.86.103:31245", "5GcSNukkKePWpNSjx9STyoEZniJAN4U4EUzdsQyqhuP3WYf6nj"],
-        ["149.202.89.125:31245", "5wDwi2GYPniGLzpDfKjXJrmHV3p1rLRmm4bQ9TUWNVkpYmd4Zm"],
-        ["158.69.120.215:31245", "5QbsTjSoKzYc8uBbwPCap392CoMQfZ2jviyq492LZPpijctb9c"],
-        ["158.69.23.120:31245", "8139kbee951YJdwK99odM7e6V3eW7XShCfX5E2ovG3b9qxqqrq"]
+        ["149.202.86.103:31245", "P12UbyLJDS7zimGWf3LTHe8hYY67RdLke1iDRZqJbQQLHQSKPW8j"],
+        ["149.202.89.125:31245", "P12vxrYTQzS5TRzxLfFNYxn6PyEsphKWkdqx2mVfEuvJ9sPF43uq"],
+        ["158.69.120.215:31245", "P12rPDBmpnpnbECeAKDjbmeR19dYjAUwyLzsa8wmYJnkXLCNF28E"],
+        ["158.69.23.120:31245", "P1XxexKa3XNzvmakNmPawqFrE9Z2NFhfq1AhvV1Qx4zXq5p1Bp9"],
+        ["198.27.74.5:31245", "P1qxuqNnx9kyAMYxUfsYiv2gQd5viiBX126SzzexEdbbWd2vQKu"],
+        ["198.27.74.52:31245", "P1hdgsVsd4zkNp8cF1rdqqG6JPRQasAmx12QgJaJHBHFU1fRHEH"],
+        ["54.36.174.177:31245", "P1gEdBVEbRFbBxBtrjcTDDK9JPbJFDay27uiJRE3vmbFAFDKNh7"],
+        ["51.75.60.228:31245", "P13Ykon8Zo73PTKMruLViMMtE2rEG646JQ4sCcee2DnopmVM3P5"]
     ]
     # [optionnal] port on which to listen for incoming bootstrap requests
     bind = "[::]:31245"
     # timeout to establish a bootstrap connection
     connect_timeout = 15000
     # delay in milliseconds to wait between consecutive bootstrap attempts
-    retry_delay = 5000
-    # if ping is too high bootstrap will be inturrupted after max_ping milliseconds
+    retry_delay = 60000
+    # if ping is too high bootstrap will be interrupted after max_ping milliseconds
     max_ping = 10000
     # timeout for incoming message readout
-    read_timeout = 10000
+    read_timeout = 100000
     # timeout for message sending
-    write_timeout = 10000
+    write_timeout = 100000
+    # timeout for incoming error message readout
+    read_error_timeout = 200
+    # timeout for message error sending
+    write_error_timeout = 200
     # when enabled, apply a correction to the local computer clock to match bootstrap server time
     enable_clock_synchronization = false
-    # [server] data is cached for cache duration millis
+    # [server] data is cached for cache duration milliseconds
     cache_duration = 15000
     # max number of simulataneous bootstraps for server
     max_simultaneous_bootstraps = 2
     # max size of recently bootstrapped IP cache
     ip_list_max_size = 10000
     # refuse consecutive bootstrap attempts from a given IP when the interval between them is lower than per_ip_min_interval milliseconds
-    per_ip_min_interval = 86400000
+    per_ip_min_interval = 180000
+    # Read-Write limitation for a connection in bytes per seconds (about the bootstrap specifically)
+    max_bytes_read_write = 20_000_000.0
 
 [pool]
     # max number of operations kept per thread

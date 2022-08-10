@@ -11,10 +11,11 @@ use massa_models::{
     constants::CHANNEL_SIZE,
     prehash::{Map, Set},
     stats::PoolStats,
-    Address, BlockId, Endorsement, EndorsementId, Operation, OperationId, OperationSearchResult,
-    Slot,
+    Address, BlockId, EndorsementId, OperationId, OperationSearchResult, Slot, WrappedEndorsement,
+    WrappedOperation,
 };
 use massa_protocol_exports::{ProtocolCommandSender, ProtocolPoolEventReceiver};
+use massa_storage::Storage;
 use tokio::{
     sync::{mpsc, oneshot},
     task::JoinHandle,
@@ -24,13 +25,14 @@ use tracing::{debug, error, info};
 /// Creates a new pool controller.
 ///
 /// # Arguments
-/// * pool_settings: pool configuration
-/// * protocol_command_sender: a ProtocolCommandSender instance to send commands to Protocol.
-/// * protocol_pool_event_receiver: a ProtocolPoolEventReceiver instance to receive pool events from Protocol.
+/// * `pool_settings`: pool configuration
+/// * `protocol_command_sender`: a `ProtocolCommandSender` instance to send commands to Protocol.
+/// * `protocol_pool_event_receiver`: a `ProtocolPoolEventReceiver` instance to receive pool events from `Protocol`.
 pub async fn start_pool_controller(
     cfg: &'static PoolConfig,
     protocol_command_sender: ProtocolCommandSender,
     protocol_pool_event_receiver: ProtocolPoolEventReceiver,
+    storage: Storage,
 ) -> Result<(PoolCommandSender, PoolManager), PoolError> {
     debug!("starting pool controller");
     massa_trace!("pool.pool_controller.start_pool_controller", {});
@@ -45,6 +47,7 @@ pub async fn start_pool_controller(
             protocol_pool_event_receiver,
             command_rx,
             manager_rx,
+            storage,
         )?
         .run_loop()
         .await;
@@ -68,33 +71,33 @@ pub async fn start_pool_controller(
     ))
 }
 
+/// Pool command sender
 #[derive(Clone)]
 pub struct PoolCommandSender(pub mpsc::Sender<PoolCommand>);
 
 impl PoolCommandSender {
+    /// add operations to pool
     pub async fn add_operations(
         &mut self,
-        operations: Map<OperationId, Operation>,
+        operations: Map<OperationId, WrappedOperation>,
     ) -> Result<(), PoolError> {
         massa_trace!("pool.command_sender.add_operations", { "ops": operations });
-        let res = self
-            .0
+        self.0
             .send(PoolCommand::AddOperations(operations))
             .await
-            .map_err(|_| PoolError::ChannelError("add_operations command send error".into()));
-        res
+            .map_err(|_| PoolError::ChannelError("add_operations command send error".into()))
     }
 
+    /// update current slots
     pub async fn update_current_slot(&mut self, slot: Slot) -> Result<(), PoolError> {
         massa_trace!("pool.command_sender.update_current_slot", { "slot": slot });
-        let res = self
-            .0
+        self.0
             .send(PoolCommand::UpdateCurrentSlot(slot))
             .await
-            .map_err(|_| PoolError::ChannelError("update_current_slot command send error".into()));
-        res
+            .map_err(|_| PoolError::ChannelError("update_current_slot command send error".into()))
     }
 
+    /// get pool stats
     pub async fn get_pool_stats(&mut self) -> Result<PoolStats, PoolError> {
         massa_trace!("pool.command_sender.get_pool_stats", {});
         let (response_tx, response_rx) = oneshot::channel();
@@ -111,6 +114,7 @@ impl PoolCommandSender {
         })
     }
 
+    /// mark operations as final
     pub async fn final_operations(
         &mut self,
         ops: Map<OperationId, (u64, u8)>,
@@ -122,6 +126,7 @@ impl PoolCommandSender {
             .map_err(|_| PoolError::ChannelError("final_operations command send error".into()))
     }
 
+    /// update latest final periods
     pub async fn update_latest_final_periods(
         &mut self,
         periods: Vec<u64>,
@@ -129,30 +134,28 @@ impl PoolCommandSender {
         massa_trace!("pool.command_sender.update_latest_final_periods", {
             "periods": periods
         });
-        let res = self
-            .0
+        self.0
             .send(PoolCommand::UpdateLatestFinalPeriods(periods))
             .await
             .map_err(|_| {
                 PoolError::ChannelError("update_latest_final_periods command send error".into())
-            });
-        res
+            })
     }
 
     /// Returns a batch of operations ordered from highest to lowest rentability
-    /// Return value: vector of (OperationId, Operation, operation_size: u64)
-    pub async fn get_operation_batch(
+    /// Return value: vector of `(Operation, operation_size: u64)`
+    pub async fn send_get_operations_announcement(
         &mut self,
         target_slot: Slot,
         exclude: Set<OperationId>,
         batch_size: usize,
         max_size: u64,
-    ) -> Result<Vec<(OperationId, Operation, u64)>, PoolError> {
+    ) -> Result<Vec<(WrappedOperation, u64)>, PoolError> {
         massa_trace!("pool.command_sender.get_operation_batch", {
             "target_slot": target_slot
         });
 
-        let (response_tx, response_rx) = oneshot::channel::<Vec<(OperationId, Operation, u64)>>();
+        let (response_tx, response_rx) = oneshot::channel();
         self.0
             .send(PoolCommand::GetOperationBatch {
                 target_slot,
@@ -174,12 +177,13 @@ impl PoolCommandSender {
         })
     }
 
+    /// get endorsements for block creation
     pub async fn get_endorsements(
         &mut self,
         target_slot: Slot,
         parent: BlockId,
         creators: Vec<Address>,
-    ) -> Result<Vec<(EndorsementId, Endorsement)>, PoolError> {
+    ) -> Result<Vec<WrappedEndorsement>, PoolError> {
         massa_trace!("pool.command_sender.get_endorsements", {
             "target_slot": target_slot
         });
@@ -203,10 +207,11 @@ impl PoolCommandSender {
         })
     }
 
+    /// get operations by ids
     pub async fn get_operations(
         &mut self,
         operation_ids: Set<OperationId>,
-    ) -> Result<Map<OperationId, Operation>, PoolError> {
+    ) -> Result<Map<OperationId, WrappedOperation>, PoolError> {
         massa_trace!("pool.command_sender.get_operations", {
             "operation_ids": operation_ids
         });
@@ -228,6 +233,7 @@ impl PoolCommandSender {
         })
     }
 
+    /// get operation by involved addresses
     pub async fn get_operations_involving_address(
         &mut self,
         address: Address,
@@ -257,25 +263,25 @@ impl PoolCommandSender {
         })
     }
 
+    /// add endorsements to pool
     pub async fn add_endorsements(
         &mut self,
-        endorsements: Map<EndorsementId, Endorsement>,
+        endorsements: Map<EndorsementId, WrappedEndorsement>,
     ) -> Result<(), PoolError> {
         massa_trace!("pool.command_sender.add_endorsements", {
             "endorsements": endorsements
         });
-        let res = self
-            .0
+        self.0
             .send(PoolCommand::AddEndorsements(endorsements))
             .await
-            .map_err(|_| PoolError::ChannelError("add_endorsements command send error".into()));
-        res
+            .map_err(|_| PoolError::ChannelError("add_endorsements command send error".into()))
     }
 
+    /// get endorsements by address
     pub async fn get_endorsements_by_address(
         &self,
         address: Address,
-    ) -> Result<Map<EndorsementId, Endorsement>, PoolError> {
+    ) -> Result<Map<EndorsementId, WrappedEndorsement>, PoolError> {
         massa_trace!("pool.command_sender.get_endorsements_by_address", {
             "address": address
         });
@@ -299,10 +305,11 @@ impl PoolCommandSender {
         })
     }
 
+    /// get endorsements by id
     pub async fn get_endorsements_by_id(
         &self,
         endorsements: Set<EndorsementId>,
-    ) -> Result<Map<EndorsementId, Endorsement>, PoolError> {
+    ) -> Result<Map<EndorsementId, WrappedEndorsement>, PoolError> {
         massa_trace!("pool.command_sender.get_endorsements_by_id", {
             "endorsements": endorsements
         });
@@ -327,12 +334,14 @@ impl PoolCommandSender {
     }
 }
 
+/// pool management handle
 pub struct PoolManager {
     join_handle: JoinHandle<Result<ProtocolPoolEventReceiver, PoolError>>,
     manager_tx: mpsc::Sender<PoolManagementCommand>,
 }
 
 impl PoolManager {
+    /// stop pool
     pub async fn stop(self) -> Result<ProtocolPoolEventReceiver, PoolError> {
         massa_trace!("pool.pool_controller.stop", {});
         drop(self.manager_tx);

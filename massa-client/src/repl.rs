@@ -1,18 +1,21 @@
 // Copyright (c) 2022 MASSA LABS <info@massa.net>
 
 use crate::cmds::{Command, ExtendedWallet};
-use crate::rpc::Client;
 use crate::settings::SETTINGS;
 use crate::utils::longest_common_prefix;
 use console::style;
 use dialoguer::{theme::ColorfulTheme, Completion, History, Input};
 use erased_serde::{Serialize, Serializer};
 use glob::glob;
-use massa_models::api::{AddressInfo, BlockInfo, EndorsementInfo, NodeStatus, OperationInfo};
+use massa_models::api::{
+    AddressInfo, BlockInfo, DatastoreEntryOutput, EndorsementInfo, NodeStatus, OperationInfo,
+};
 use massa_models::composite::PubkeySig;
 use massa_models::execution::ExecuteReadOnlyResponse;
+use massa_models::output_event::SCOutputEvent;
 use massa_models::prehash::Set;
 use massa_models::{Address, OperationId};
+use massa_sdk::Client;
 use massa_wallet::Wallet;
 use rev_lines::RevLines;
 use std::collections::VecDeque;
@@ -147,7 +150,7 @@ fn expand_path(partial_path: &str) -> Vec<u8> {
 }
 
 impl Completion for CommandCompletion {
-    /// Simple completion implementation based on substring
+    /// Simple completion implementation based on sub-string
     fn get(&self, input: &str) -> Option<String> {
         let input = input.to_string();
         if input.contains(' ') {
@@ -263,6 +266,14 @@ impl Output for Vec<AddressInfo> {
     }
 }
 
+impl Output for Vec<DatastoreEntryOutput> {
+    fn pretty_print(&self) {
+        for data_entry in self {
+            println!("{}", data_entry);
+        }
+    }
+}
+
 impl Output for Vec<EndorsementInfo> {
     fn pretty_print(&self) {
         for endorsement_info in self {
@@ -288,6 +299,14 @@ impl Output for Vec<OperationId> {
 }
 
 impl Output for Vec<Address> {
+    fn pretty_print(&self) {
+        for addr in self {
+            println!("{}", addr);
+        }
+    }
+}
+
+impl Output for Vec<SCOutputEvent> {
     fn pretty_print(&self) {
         for addr in self {
             println!("{}", addr);

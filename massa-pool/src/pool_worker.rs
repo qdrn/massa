@@ -6,50 +6,81 @@ use crate::{endorsement_pool::EndorsementPool, settings::PoolConfig};
 use massa_models::prehash::{Map, Set};
 use massa_models::stats::PoolStats;
 use massa_models::{
-    Address, BlockId, Endorsement, EndorsementId, Operation, OperationId, OperationSearchResult,
-    Slot,
+    Address, BlockId, EndorsementId, OperationId, OperationSearchResult, Slot, WrappedEndorsement,
+    WrappedOperation,
 };
 use massa_protocol_exports::{ProtocolCommandSender, ProtocolPoolEvent, ProtocolPoolEventReceiver};
+use massa_storage::Storage;
 use tokio::sync::{mpsc, oneshot};
 use tracing::warn;
 
 /// Commands that can be processed by pool.
 #[derive(Debug)]
 pub enum PoolCommand {
-    AddOperations(Map<OperationId, Operation>),
+    /// Add operations to the pool
+    AddOperations(Map<OperationId, WrappedOperation>),
+    /// current slot update
     UpdateCurrentSlot(Slot),
+    /// Latest final periods update
     UpdateLatestFinalPeriods(Vec<u64>),
+    /// Get an operation batch for block creation
     GetOperationBatch {
+        /// target slot
         target_slot: Slot,
+        /// list of operation ids to exclude  from the batch
         exclude: Set<OperationId>,
+        /// expected batch size
         batch_size: usize,
+        /// max size of an operation in bytes
         max_size: u64,
-        response_tx: oneshot::Sender<Vec<(OperationId, Operation, u64)>>,
+        /// response channel
+        response_tx: oneshot::Sender<Vec<(WrappedOperation, u64)>>,
     },
+    /// get operations by id
     GetOperations {
+        /// ids
         operation_ids: Set<OperationId>,
-        response_tx: oneshot::Sender<Map<OperationId, Operation>>,
+        /// response channel
+        response_tx: oneshot::Sender<Map<OperationId, WrappedOperation>>,
     },
+    /// Get operations by involved address
     GetRecentOperations {
+        /// address
         address: Address,
+        /// response channel
         response_tx: oneshot::Sender<Map<OperationId, OperationSearchResult>>,
     },
-    FinalOperations(Map<OperationId, (u64, u8)>), // (end of validity period, thread)
+    /// mark operations as final
+    /// by end of validity period, thread
+    FinalOperations(Map<OperationId, (u64, u8)>),
+    /// Get endorsements for block creation
     GetEndorsements {
+        /// target slot
         target_slot: Slot,
+        /// expected parent
         parent: BlockId,
+        /// expected creators
         creators: Vec<Address>,
-        response_tx: oneshot::Sender<Vec<(EndorsementId, Endorsement)>>,
+        /// response channel
+        response_tx: oneshot::Sender<Vec<WrappedEndorsement>>,
     },
-    AddEndorsements(Map<EndorsementId, Endorsement>),
+    /// add endorsements to pool
+    AddEndorsements(Map<EndorsementId, WrappedEndorsement>),
+    /// get pool stats
     GetStats(oneshot::Sender<PoolStats>),
+    /// get endorsements by address
     GetEndorsementsByAddress {
+        /// address
         address: Address,
-        response_tx: oneshot::Sender<Map<EndorsementId, Endorsement>>,
+        /// response channel
+        response_tx: oneshot::Sender<Map<EndorsementId, WrappedEndorsement>>,
     },
+    /// get endorsements by id
     GetEndorsementsById {
+        /// ids
         endorsements: Set<EndorsementId>,
-        response_tx: oneshot::Sender<Map<EndorsementId, Endorsement>>,
+        /// response channel
+        response_tx: oneshot::Sender<Map<EndorsementId, WrappedEndorsement>>,
     },
 }
 
@@ -78,19 +109,20 @@ impl PoolWorker {
     /// Initiates the random selector.
     ///
     /// # Arguments
-    /// * pool_settings: pool configuration.
-    /// * thread_count: number of threads
-    /// * operation_validity_periods : operation validity period
-    /// * protocol_command_sender: associated protocol controller
-    /// * protocol_command_sender protocol pool event receiver
-    /// * controller_command_rx: Channel receiving pool commands.
-    /// * controller_manager_rx: Channel receiving pool management commands.
+    /// * `pool_settings`: pool configuration.
+    /// * `thread_count`: number of threads
+    /// * `operation_validity_periods`: operation validity period
+    /// * `protocol_command_sender`: associated protocol controller
+    /// * `protocol_command_sender`: protocol pool event receiver
+    /// * `controller_command_rx`: Channel receiving pool commands.
+    /// * `controller_manager_rx`: Channel receiving pool management commands.
     pub fn new(
         cfg: &'static PoolConfig,
         protocol_command_sender: ProtocolCommandSender,
         protocol_pool_event_receiver: ProtocolPoolEventReceiver,
         controller_command_rx: mpsc::Receiver<PoolCommand>,
         controller_manager_rx: mpsc::Receiver<PoolManagementCommand>,
+        storage: Storage,
     ) -> Result<PoolWorker, PoolError> {
         massa_trace!("pool.pool_worker.new", {});
         Ok(PoolWorker {
@@ -98,7 +130,7 @@ impl PoolWorker {
             protocol_pool_event_receiver,
             controller_command_rx,
             controller_manager_rx,
-            operation_pool: OperationPool::new(cfg),
+            operation_pool: OperationPool::new(cfg, storage),
             endorsement_pool: EndorsementPool::new(cfg),
         })
     }
@@ -149,15 +181,14 @@ impl PoolWorker {
     /// Manages given pool command.
     ///
     /// # Argument
-    /// * cmd: consensus command to process
+    /// * `cmd`: consensus command to process
     async fn process_pool_command(&mut self, cmd: PoolCommand) -> Result<(), PoolError> {
         match cmd {
-            PoolCommand::AddOperations(mut operations) => {
-                let newly_added = self.operation_pool.add_operations(operations.clone())?;
-                operations.retain(|op_id, _op| newly_added.contains(op_id));
-                if !operations.is_empty() {
+            PoolCommand::AddOperations(operations) => {
+                let newly_added = self.operation_pool.process_operations(operations)?;
+                if !newly_added.is_empty() {
                     self.protocol_command_sender
-                        .propagate_operations(operations)
+                        .propagate_operations(newly_added)
                         .await?;
                 }
             }
@@ -289,19 +320,18 @@ impl PoolWorker {
     ) -> Result<(), PoolError> {
         match event {
             ProtocolPoolEvent::ReceivedOperations {
-                mut operations,
+                operations,
                 propagate,
             } => {
                 if propagate {
-                    let newly_added = self.operation_pool.add_operations(operations.clone())?;
-                    operations.retain(|op_id, _op| newly_added.contains(op_id));
-                    if !operations.is_empty() {
+                    let newly_added = self.operation_pool.process_operations(operations)?;
+                    if !newly_added.is_empty() {
                         self.protocol_command_sender
-                            .propagate_operations(operations)
+                            .propagate_operations(newly_added)
                             .await?;
                     }
                 } else {
-                    self.operation_pool.add_operations(operations)?;
+                    self.operation_pool.process_operations(operations)?;
                 }
             }
             ProtocolPoolEvent::ReceivedEndorsements {
