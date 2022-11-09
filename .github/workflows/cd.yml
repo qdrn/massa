@@ -38,7 +38,7 @@ jobs:
             name: release_macos_aarch64.tar.gz
         exclude:
           - os: windows-latest
-            platform: arm6
+            platform: arm64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v2
