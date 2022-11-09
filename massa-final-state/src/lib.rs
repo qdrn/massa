@@ -21,6 +21,10 @@
 //! Represents a list of changes the final state.
 //! It can be modified, combined or applied to the final ledger.
 //!
+//! ## `executed_ops.rs`
+//! Defines a structure to list and prune previously executed operations.
+//! Used to detect operation reuse.
+//!
 //! ## `bootstrap.rs`
 //! Provides serializable structures and tools for bootstrapping the final state.
 //!
@@ -32,8 +36,8 @@
 #![warn(missing_docs)]
 #![warn(unused_crate_dependencies)]
 #![feature(hash_drain_filter)]
-#![feature(map_first_last)]
 #![feature(async_closure)]
+#![feature(map_try_insert)]
 
 mod config;
 mod error;

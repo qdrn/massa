@@ -8,17 +8,22 @@ use massa_models::api::{
 };
 use massa_models::api::{ReadOnlyBytecodeExecution, ReadOnlyCall};
 use massa_models::node::NodeId;
-use massa_models::prehash::Map;
+use massa_models::prehash::PreHashMap;
 use massa_models::timeslots::get_current_latest_block_slot;
 use massa_models::{
-    Address, Amount, BlockId, EndorsementId, Operation, OperationId, OperationType, Slot,
+    address::Address,
+    amount::Amount,
+    block::BlockId,
+    endorsement::EndorsementId,
+    operation::{Operation, OperationId, OperationType},
+    slot::Slot,
 };
 use massa_sdk::Client;
 use massa_signature::KeyPair;
 use massa_time::MassaTime;
-use massa_wallet::{Wallet, WalletError};
+use massa_wallet::Wallet;
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 use std::fmt::{Debug, Display};
 use std::net::IpAddr;
@@ -152,7 +157,7 @@ pub enum Command {
     #[strum(
         ascii_case_insensitive,
         props(
-            args = "start=Slot end=Slot emitter_address=Address caller_address=Address operation_id=OperationId"
+            args = "start=Slot end=Slot emitter_address=Address caller_address=Address operation_id=OperationId is_final=bool"
         ),
         message = "show events emitted by smart contracts with various filters"
     )]
@@ -214,7 +219,7 @@ pub enum Command {
 
     #[strum(
         ascii_case_insensitive,
-        props(args = "SenderAddress PathToBytecode MaxGas GasPrice Coins Fee",),
+        props(args = "SenderAddress PathToBytecode MaxGas GasPrice Fee",),
         message = "create and send an operation containing byte code"
     )]
     send_smart_contract,
@@ -295,7 +300,7 @@ impl Display for ExtendedWalletEntry {
 /// Aggregation of the local, with some useful information as the balance, etc
 /// to be printed by the client.
 #[derive(Debug, Serialize)]
-pub struct ExtendedWallet(Map<Address, ExtendedWalletEntry>);
+pub struct ExtendedWallet(PreHashMap<Address, ExtendedWalletEntry>);
 
 impl ExtendedWallet {
     /// Reorganize everything into an extended wallet
@@ -476,8 +481,11 @@ impl Command {
             }
 
             Command::node_add_staking_secret_keys => {
-                let keypairs = parse_vec::<KeyPair>(parameters)?;
-                match client.private.add_staking_secret_keys(keypairs).await {
+                match client
+                    .private
+                    .add_staking_secret_keys(parameters.to_vec())
+                    .await
+                {
                     Ok(()) => {
                         if !json {
                             println!("Keys successfully added!")
@@ -496,7 +504,7 @@ impl Command {
                 let addr = parameters[0].parse::<Address>()?;
                 let msg = parameters[1].as_bytes().to_vec();
                 // get address signature
-                if let Some(addr_sig) = wallet.sign_message(addr, msg.clone()) {
+                if let Some(addr_sig) = wallet.sign_message(&addr, msg.clone()) {
                     // get node signature
                     match client.private.node_sign_message(msg).await {
                         // print concatenation
@@ -576,12 +584,13 @@ impl Command {
             }
 
             Command::get_filtered_sc_output_event => {
-                let p_list: [&str; 5] = [
+                let p_list: [&str; 6] = [
                     "start",
                     "end",
                     "emitter_address",
                     "caller_address",
                     "operation_id",
+                    "is_final",
                 ];
                 let mut p: HashMap<&str, &str> = HashMap::new();
                 for v in parameters {
@@ -593,11 +602,12 @@ impl Command {
                     }
                 }
                 let filter = EventFilter {
-                    start: parse_value(&p, p_list[0]),
-                    end: parse_value(&p, p_list[1]),
-                    emitter_address: parse_value(&p, p_list[2]),
-                    original_caller_address: parse_value(&p, p_list[3]),
-                    original_operation_id: parse_value(&p, p_list[4]),
+                    start: parse_key_value(&p, p_list[0]),
+                    end: parse_key_value(&p, p_list[1]),
+                    emitter_address: parse_key_value(&p, p_list[2]),
+                    original_caller_address: parse_key_value(&p, p_list[3]),
+                    original_operation_id: parse_key_value(&p, p_list[4]),
+                    is_final: parse_key_value(&p, p_list[5]),
                 };
                 match client.public.get_filtered_sc_output_event(filter).await {
                     Ok(events) => Ok(Box::new(events)),
@@ -623,52 +633,39 @@ impl Command {
 
             Command::wallet_generate_secret_key => {
                 let key = KeyPair::generate();
-                let ad = wallet.add_keypair(key.clone())?;
+                let ad = wallet.add_keypairs(vec![key])?[0];
                 if json {
                     Ok(Box::new(ad.to_string()))
                 } else {
                     println!("Generated {} address and added it to the wallet", ad);
-                    println!(
-                        "Type `node_add_staking_secret_keys {}` to start staking with this key.\n",
-                        key
-                    );
+                    println!("Type `node_add_staking_secret_keys <your secret key>` to start staking with this key.\n");
                     Ok(Box::new(()))
                 }
             }
 
             Command::wallet_add_secret_keys => {
-                let addresses = parse_vec::<KeyPair>(parameters)?
-                    .into_iter()
-                    .map(|key| Ok((wallet.add_keypair(key.clone())?, key)))
-                    .collect::<Result<HashMap<Address, KeyPair>>>()?;
+                let keypairs = parse_vec::<KeyPair>(parameters)?;
+                let addresses = wallet.add_keypairs(keypairs)?;
                 if json {
-                    return Ok(Box::new(addresses.into_keys().collect::<Vec<Address>>()));
+                    return Ok(Box::new(addresses));
                 } else {
-                    for (address, key) in addresses.iter() {
+                    for address in addresses {
                         println!("Derived and added address {} to the wallet.", address);
-                        println!(
-                            "Type `node_add_staking_secret_keys {}` to start staking with this key.\n",
-                            key
-                        );
                     }
+                    println!("Type `node_add_staking_secret_keys <your secret key>` to start staking with the corresponding key.\n");
                 }
                 Ok(Box::new(()))
             }
 
             Command::wallet_remove_addresses => {
                 let mut res = "".to_string();
-                for key in parse_vec::<Address>(parameters)?.into_iter() {
-                    match wallet.remove_address(key) {
-                        Ok(_) => {
-                            let _ = writeln!(res, "Removed address {} from the wallet", key);
-                        }
-                        Err(WalletError::MissingKeyError(_)) => {
-                            let _ = writeln!(res, "Address {} wasn't in the wallet", key);
-                        }
-                        Err(_) => {
-                            let _ =
-                                writeln!(res, "Failed to remove address {} from the wallet", key);
-                        }
+                let addresses = parse_vec::<Address>(parameters)?;
+                match wallet.remove_addresses(&addresses) {
+                    Ok(_) => {
+                        let _ = writeln!(res, "Addresses removed from the wallet");
+                    }
+                    Err(_) => {
+                        let _ = writeln!(res, "Wallet error while removing addresses");
                     }
                 }
                 if !json {
@@ -700,7 +697,7 @@ impl Command {
                             {
                                 match addresses_info.get(0) {
                                     Some(info) => {
-                                        if info.ledger_info.candidate_ledger_info.balance < total {
+                                        if info.candidate_balance < total {
                                             client_warning!("this operation may be rejected due to insufficient balance");
                                         }
                                     }
@@ -743,8 +740,8 @@ impl Command {
                     if let Ok(addresses_info) = client.public.get_addresses(vec![addr]).await {
                         match addresses_info.get(0) {
                             Some(info) => {
-                                if info.ledger_info.candidate_ledger_info.balance < fee
-                                    || roll_count > info.rolls.candidate_rolls
+                                if info.candidate_balance < fee
+                                    || roll_count > info.candidate_roll_count
                                 {
                                     client_warning!("this operation may be rejected due to insufficient balance or roll count");
                                 }
@@ -775,25 +772,16 @@ impl Command {
                 let fee = parameters[3].parse::<Amount>()?;
 
                 if !json {
-                    match amount.checked_add(fee) {
-                        Some(total) => {
-                            if let Ok(addresses_info) =
-                                client.public.get_addresses(vec![addr]).await
-                            {
-                                match addresses_info.get(0) {
-                                    Some(info) => {
-                                        if info.ledger_info.candidate_ledger_info.balance < total {
-                                            client_warning!("this operation may be rejected due to insufficient balance");
-                                        }
-                                    }
-                                    None => {
-                                        client_warning!(format!("address {} not found", addr))
-                                    }
+                    if let Ok(addresses_info) = client.public.get_addresses(vec![addr]).await {
+                        match addresses_info.get(0) {
+                            Some(info) => {
+                                if info.candidate_balance < fee {
+                                    client_warning!("this operation may be rejected due to insufficient balance");
                                 }
                             }
-                        }
-                        None => {
-                            client_warning!("the total amount hit the limit overflow, operation will certainly be rejected");
+                            None => {
+                                client_warning!(format!("address {} not found", addr))
+                            }
                         }
                     }
                 }
@@ -818,8 +806,9 @@ impl Command {
                 };
                 let mut res = "".to_string();
                 if let Some(e) = end {
-                    let (days, hours, mins, secs) =
-                        e.saturating_sub(MassaTime::now()?).days_hours_mins_secs()?; // compensation milliseconds is zero
+                    let (days, hours, mins, secs) = e
+                        .saturating_sub(MassaTime::now(0)?)
+                        .days_hours_mins_secs()?; // compensation milliseconds is zero
 
                     let _ = write!(res, "{} days, {} hours, {} minutes, {} seconds remaining until the end of the current episode", days, hours, mins, secs);
                 } else {
@@ -838,20 +827,18 @@ impl Command {
                 Ok(Box::new(()))
             }
             Command::send_smart_contract => {
-                if parameters.len() != 6 {
+                if parameters.len() != 5 {
                     bail!("wrong number of parameters");
                 }
                 let addr = parameters[0].parse::<Address>()?;
                 let path = parameters[1].parse::<PathBuf>()?;
                 let max_gas = parameters[2].parse::<u64>()?;
                 let gas_price = parameters[3].parse::<Amount>()?;
-                let coins = parameters[4].parse::<Amount>()?;
-                let fee = parameters[5].parse::<Amount>()?;
+                let fee = parameters[4].parse::<Amount>()?;
 
                 if !json {
                     match gas_price
                         .checked_mul_u64(max_gas)
-                        .and_then(|x| x.checked_add(coins))
                         .and_then(|x| x.checked_add(fee))
                     {
                         Some(total) => {
@@ -860,7 +847,7 @@ impl Command {
                             {
                                 match addresses_info.get(0) {
                                     Some(info) => {
-                                        if info.ledger_info.candidate_ledger_info.balance < total {
+                                        if info.candidate_balance < total {
                                             client_warning!("this operation may be rejected due to insufficient balance");
                                         }
                                     }
@@ -885,6 +872,7 @@ impl Command {
                         client_warning!("bytecode size exceeded half of the maximum size of a block, operation will certainly be rejected");
                     }
                 }
+                let datastore = BTreeMap::new();
 
                 send_operation(
                     client,
@@ -892,8 +880,8 @@ impl Command {
                     OperationType::ExecuteSC {
                         data,
                         max_gas,
-                        coins,
                         gas_price,
+                        datastore,
                     },
                     fee,
                     addr,
@@ -924,10 +912,7 @@ impl Command {
                             {
                                 match addresses_info.get(0) {
                                     Some(info) => {
-                                        if info.ledger_info.candidate_ledger_info.balance < total
-                                            || info.candidate_balance_info.unwrap_or_default()
-                                                < coins
-                                        {
+                                        if info.candidate_balance < total {
                                             client_warning!("this operation may be rejected due to insufficient balance");
                                         }
                                     }
@@ -953,8 +938,7 @@ impl Command {
                         target_func,
                         param,
                         max_gas,
-                        sequential_coins: Amount::zero(),
-                        parallel_coins: coins,
+                        coins,
                         gas_price,
                     },
                     fee,
@@ -969,7 +953,7 @@ impl Command {
                 }
                 let addr = parameters[0].parse::<Address>()?;
                 let msg = parameters[1].clone();
-                if let Some(signed) = wallet.sign_message(addr, msg.into_bytes()) {
+                if let Some(signed) = wallet.sign_message(&addr, msg.into_bytes()) {
                     Ok(Box::new(signed))
                 } else {
                     bail!("Missing public key")
@@ -996,6 +980,7 @@ impl Command {
                         simulated_gas_price,
                         bytecode,
                         address,
+                        operation_datastore: None, // TODO - #3072
                     })
                     .await
                 {
@@ -1124,7 +1109,7 @@ async fn get_file_as_byte_vec(filename: &std::path::Path) -> Result<Vec<u8>> {
 }
 
 // chains get_key_value with its parsing and displays a warning on parsing error
-pub fn parse_value<T: std::str::FromStr>(p: &HashMap<&str, &str>, key: &str) -> Option<T> {
+pub fn parse_key_value<T: std::str::FromStr>(p: &HashMap<&str, &str>, key: &str) -> Option<T> {
     p.get_key_value(key).and_then(|x| {
         x.1.parse::<T>()
             .map_err(|_| {

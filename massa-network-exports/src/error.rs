@@ -2,7 +2,7 @@
 
 use crate::{peers::PeerType, ConnectionId};
 use displaydoc::Display;
-use massa_models::ModelsError;
+use massa_models::error::ModelsError;
 use massa_serialization::SerializeError;
 use std::net::IpAddr;
 use thiserror::Error;
@@ -33,7 +33,7 @@ pub enum NetworkError {
     SerdeError(#[from] serde_json::Error),
     /// `MassaHash` error {0}
     MassaHashError(#[from] massa_hash::MassaHashError),
-    /// massa_signature error {0}
+    /// `massa_signature` error {0}
     MassaSignatureError(#[from] massa_signature::MassaSignatureError),
     /// handshake error:{0:?}
     HandshakeError(HandshakeErrorType),

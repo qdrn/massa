@@ -1,10 +1,12 @@
-// Copyright (c) 2022 MASSA LABS <info@massa.net>
+//! Copyright (c) 2022 MASSA LABS <info@massa.net>
 
+use crate::config::APIConfig;
 use crate::error::ApiError;
-use crate::settings::APISettings;
-use crate::{Endpoints, Private, RpcServer, StopHandle, API};
+use crate::{Endpoints, Private, RpcServer, StopHandle, Value, API};
+
 use jsonrpc_core::BoxFuture;
 use jsonrpc_http_server::tokio::sync::mpsc;
+
 use massa_consensus_exports::{ConsensusCommandSender, ConsensusConfig};
 use massa_execution_exports::ExecutionController;
 use massa_models::api::{
@@ -17,11 +19,22 @@ use massa_models::composite::PubkeySig;
 use massa_models::execution::ExecuteReadOnlyResponse;
 use massa_models::node::NodeId;
 use massa_models::output_event::SCOutputEvent;
-use massa_models::prehash::Set;
-use massa_models::{Address, BlockId, EndorsementId, OperationId};
+use massa_models::prehash::PreHashSet;
+use massa_models::{
+    address::Address,
+    block::{Block, BlockId},
+    endorsement::EndorsementId,
+    operation::OperationId,
+    slot::Slot,
+};
 use massa_network_exports::NetworkCommandSender;
 use massa_signature::KeyPair;
+use massa_wallet::Wallet;
+
+use parking_lot::RwLock;
 use std::net::{IpAddr, SocketAddr};
+use std::str::FromStr;
+use std::sync::Arc;
 
 impl API<Private> {
     /// generate a new private API
@@ -29,8 +42,9 @@ impl API<Private> {
         consensus_command_sender: ConsensusCommandSender,
         network_command_sender: NetworkCommandSender,
         execution_controller: Box<dyn ExecutionController>,
-        api_settings: &'static APISettings,
+        api_settings: APIConfig,
         consensus_settings: ConsensusConfig,
+        node_wallet: Arc<RwLock<Wallet>>,
     ) -> (Self, mpsc::Receiver<()>) {
         let (stop_node_channel, rx) = mpsc::channel(1);
         (
@@ -41,6 +55,7 @@ impl API<Private> {
                 consensus_config: consensus_settings,
                 api_settings,
                 stop_node_channel,
+                node_wallet,
             }),
             rx,
         )
@@ -72,9 +87,20 @@ impl Endpoints for API<Private> {
         Box::pin(closure())
     }
 
-    fn add_staking_secret_keys(&self, keys: Vec<KeyPair>) -> BoxFuture<Result<(), ApiError>> {
-        let cmd_sender = self.0.consensus_command_sender.clone();
-        let closure = async move || Ok(cmd_sender.register_staking_keys(keys).await?);
+    fn add_staking_secret_keys(&self, secret_keys: Vec<String>) -> BoxFuture<Result<(), ApiError>> {
+        let keypairs = match secret_keys.iter().map(|x| KeyPair::from_str(x)).collect() {
+            Ok(keypairs) => keypairs,
+            Err(e) => {
+                let closure = async move || Err(ApiError::BadRequest(e.to_string()));
+                return Box::pin(closure());
+            }
+        };
+        let node_wallet = self.0.node_wallet.clone();
+        let closure = async move || {
+            let mut w_wallet = node_wallet.write();
+            w_wallet.add_keypairs(keypairs)?;
+            Ok(())
+        };
         Box::pin(closure())
     }
 
@@ -92,19 +118,19 @@ impl Endpoints for API<Private> {
         crate::wrong_api::<_>()
     }
 
-    fn remove_staking_addresses(&self, keys: Vec<Address>) -> BoxFuture<Result<(), ApiError>> {
-        let cmd_sender = self.0.consensus_command_sender.clone();
+    fn remove_staking_addresses(&self, addresses: Vec<Address>) -> BoxFuture<Result<(), ApiError>> {
+        let node_wallet = self.0.node_wallet.clone();
         let closure = async move || {
-            Ok(cmd_sender
-                .remove_staking_addresses(keys.into_iter().collect())
-                .await?)
+            let mut w_wallet = node_wallet.write();
+            w_wallet.remove_addresses(&addresses)?;
+            Ok(())
         };
         Box::pin(closure())
     }
 
-    fn get_staking_addresses(&self) -> BoxFuture<Result<Set<Address>, ApiError>> {
-        let cmd_sender = self.0.consensus_command_sender.clone();
-        let closure = async move || Ok(cmd_sender.get_staking_addresses().await?);
+    fn get_staking_addresses(&self) -> BoxFuture<Result<PreHashSet<Address>, ApiError>> {
+        let node_wallet = self.0.node_wallet.clone();
+        let closure = async move || Ok(node_wallet.write().get_wallet_address_list());
         Box::pin(closure())
     }
 
@@ -162,6 +188,10 @@ impl Endpoints for API<Private> {
         crate::wrong_api::<BlockInfo>()
     }
 
+    fn get_blockclique_block_by_slot(&self, _: Slot) -> BoxFuture<Result<Option<Block>, ApiError>> {
+        crate::wrong_api::<Option<Block>>()
+    }
+
     fn get_graph_interval(
         &self,
         _: TimeInterval,
@@ -204,5 +234,9 @@ impl Endpoints for API<Private> {
         let network_command_sender = self.0.network_command_sender.clone();
         let closure = async move || Ok(network_command_sender.remove_from_whitelist(ips).await?);
         Box::pin(closure())
+    }
+
+    fn get_openrpc_spec(&self) -> BoxFuture<Result<Value, ApiError>> {
+        crate::wrong_api::<Value>()
     }
 }

@@ -2,8 +2,7 @@
 use displaydoc::Display;
 use massa_execution_exports::ExecutionError;
 use massa_graph::error::GraphError;
-use massa_models::ModelsError;
-use massa_proof_of_stake_exports::error::ProofOfStakeError;
+use massa_models::error::ModelsError;
 use massa_protocol_exports::ProtocolError;
 use thiserror::Error;
 
@@ -44,12 +43,10 @@ pub enum ConsensusError {
     SendChannelError(String),
     /// Receive  channel error : {0}
     ReceiveChannelError(String),
-    /// pool error : {0}
-    PoolError(#[from] massa_pool::PoolError),
     /// io error {0}
     IOError(#[from] std::io::Error),
-    /// serde error
-    SerdeError(#[from] serde_json::Error),
+    /// missing block {0}
+    MissingBlock(String),
     /// block creation error {0}
     BlockCreationError(String),
     /// error sending consensus event: {0}
@@ -58,8 +55,6 @@ pub enum ConsensusError {
     ChannelError(String),
     /// Graph error: {0}
     GraphError(#[from] GraphError),
-    /// Proof of stake error: {0}
-    ProofOfStakeError(#[from] ProofOfStakeError),
     /// slot overflow
     SlotOverflowError,
     /// `MassaCipher` error: {0}

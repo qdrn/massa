@@ -7,20 +7,31 @@
 //! More generally, the context acts only on its own state
 //! and does not write anything persistent to the consensus state.
 
-use crate::active_history::ActiveHistory;
 use crate::speculative_async_pool::SpeculativeAsyncPool;
+use crate::speculative_executed_ops::SpeculativeExecutedOps;
 use crate::speculative_ledger::SpeculativeLedger;
+use crate::{active_history::ActiveHistory, speculative_roll_state::SpeculativeRollState};
 use massa_async_pool::{AsyncMessage, AsyncMessageId};
-use massa_execution_exports::{EventStore, ExecutionError, ExecutionOutput, ExecutionStackElement};
+use massa_executed_ops::ExecutedOpsChanges;
+use massa_execution_exports::{
+    EventStore, ExecutionConfig, ExecutionError, ExecutionOutput, ExecutionStackElement,
+};
 use massa_final_state::{FinalState, StateChanges};
 use massa_ledger_exports::LedgerChanges;
+use massa_models::address::ExecutionAddressCycleInfo;
 use massa_models::{
+    address::Address,
+    amount::Amount,
+    block::BlockId,
+    operation::OperationId,
     output_event::{EventExecutionContext, SCOutputEvent},
-    Address, Amount, BlockId, OperationId, Slot,
+    slot::Slot,
 };
+use massa_pos_exports::PoSChanges;
 use parking_lot::RwLock;
 use rand::SeedableRng;
 use rand_xoshiro::Xoshiro256PlusPlus;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use tracing::debug;
 
@@ -32,6 +43,12 @@ pub(crate) struct ExecutionContextSnapshot {
 
     /// speculative asynchronous pool messages emitted so far in the context
     pub async_pool_changes: Vec<(AsyncMessageId, AsyncMessage)>,
+
+    /// speculative list of operations executed
+    pub executed_ops: ExecutedOpsChanges,
+
+    /// speculative roll state changes caused so far in the context
+    pub pos_changes: PoSChanges,
 
     /// counter of newly created addresses so far at this slot during this execution
     pub created_addr_index: u64,
@@ -53,6 +70,9 @@ pub(crate) struct ExecutionContextSnapshot {
 /// passed to the VM to interact with during bytecode execution (through ABIs),
 /// and read after execution to gather results.
 pub(crate) struct ExecutionContext {
+    /// configuration
+    config: ExecutionConfig,
+
     /// speculative ledger state,
     /// as seen after everything that happened so far in the context
     speculative_ledger: SpeculativeLedger,
@@ -60,6 +80,13 @@ pub(crate) struct ExecutionContext {
     /// speculative asynchronous pool state,
     /// as seen after everything that happened so far in the context
     speculative_async_pool: SpeculativeAsyncPool,
+
+    /// speculative roll state,
+    /// as seen after everything that happened so far in the context
+    speculative_roll_state: SpeculativeRollState,
+
+    /// speculative list of executed operations
+    speculative_executed_ops: SpeculativeExecutedOps,
 
     /// max gas for this execution
     pub max_gas: u64,
@@ -94,6 +121,9 @@ pub(crate) struct ExecutionContext {
     /// Unsafe random state (can be predicted and manipulated)
     pub unsafe_rng: Xoshiro256PlusPlus,
 
+    /// Creator address. The bytecode of this address can't be modified
+    pub creator_address: Option<Address>,
+
     /// operation id that originally caused this execution (if any)
     pub origin_operation_id: Option<OperationId>,
 }
@@ -110,12 +140,28 @@ impl ExecutionContext {
     /// # returns
     /// A new (empty) `ExecutionContext` instance
     pub(crate) fn new(
+        config: ExecutionConfig,
         final_state: Arc<RwLock<FinalState>>,
         active_history: Arc<RwLock<ActiveHistory>>,
     ) -> Self {
         ExecutionContext {
-            speculative_ledger: SpeculativeLedger::new(final_state.clone(), active_history.clone()),
-            speculative_async_pool: SpeculativeAsyncPool::new(final_state, active_history),
+            speculative_ledger: SpeculativeLedger::new(
+                final_state.clone(),
+                active_history.clone(),
+                config.max_datastore_key_length,
+                config.max_bytecode_size,
+                config.max_datastore_value_size,
+                config.storage_costs_constants,
+            ),
+            speculative_async_pool: SpeculativeAsyncPool::new(
+                final_state.clone(),
+                active_history.clone(),
+            ),
+            speculative_roll_state: SpeculativeRollState::new(
+                final_state.clone(),
+                active_history.clone(),
+            ),
+            speculative_executed_ops: SpeculativeExecutedOps::new(final_state, active_history),
             max_gas: Default::default(),
             gas_price: Default::default(),
             slot: Slot::new(0, 0),
@@ -127,7 +173,9 @@ impl ExecutionContext {
             read_only: Default::default(),
             events: Default::default(),
             unsafe_rng: Xoshiro256PlusPlus::from_seed([0u8; 32]),
+            creator_address: Default::default(),
             origin_operation_id: Default::default(),
+            config,
         }
     }
 
@@ -137,6 +185,8 @@ impl ExecutionContext {
         ExecutionContextSnapshot {
             ledger_changes: self.speculative_ledger.get_snapshot(),
             async_pool_changes: self.speculative_async_pool.get_snapshot(),
+            pos_changes: self.speculative_roll_state.get_snapshot(),
+            executed_ops: self.speculative_executed_ops.get_snapshot(),
             created_addr_index: self.created_addr_index,
             created_event_index: self.created_event_index,
             stack: self.stack.clone(),
@@ -169,6 +219,10 @@ impl ExecutionContext {
             .reset_to_snapshot(snapshot.ledger_changes);
         self.speculative_async_pool
             .reset_to_snapshot(snapshot.async_pool_changes);
+        self.speculative_roll_state
+            .reset_to_snapshot(snapshot.pos_changes);
+        self.speculative_executed_ops
+            .reset_to_snapshot(snapshot.executed_ops);
         self.created_addr_index = snapshot.created_addr_index;
         self.created_event_index = snapshot.created_event_index;
         self.stack = snapshot.stack;
@@ -193,6 +247,7 @@ impl ExecutionContext {
     /// # returns
     /// A `ExecutionContext` instance ready for a read-only execution
     pub(crate) fn readonly(
+        config: ExecutionConfig,
         slot: Slot,
         max_gas: u64,
         gas_price: Amount,
@@ -223,7 +278,7 @@ impl ExecutionContext {
             stack: call_stack,
             read_only: true,
             unsafe_rng,
-            ..ExecutionContext::new(final_state, active_history)
+            ..ExecutionContext::new(config, final_state, active_history)
         }
     }
 
@@ -258,6 +313,7 @@ impl ExecutionContext {
     /// # returns
     /// A `ExecutionContext` instance
     pub(crate) fn active_slot(
+        config: ExecutionConfig,
         slot: Slot,
         opt_block_id: Option<BlockId>,
         final_state: Arc<RwLock<FinalState>>,
@@ -283,7 +339,7 @@ impl ExecutionContext {
             slot,
             opt_block_id,
             unsafe_rng,
-            ..ExecutionContext::new(final_state, active_history)
+            ..ExecutionContext::new(config, final_state, active_history)
         }
     }
 
@@ -357,8 +413,11 @@ impl ExecutionContext {
         let address = Address(massa_hash::Hash::compute_from(&data));
 
         // add this address with its bytecode to the speculative ledger
-        self.speculative_ledger
-            .create_new_sc_address(address, bytecode)?;
+        self.speculative_ledger.create_new_sc_address(
+            self.get_current_address()?,
+            address,
+            bytecode,
+        )?;
 
         // add the address to owned addresses
         // so that the current call has write access to it
@@ -396,9 +455,9 @@ impl ExecutionContext {
         self.speculative_ledger.has_data_entry(address, key)
     }
 
-    /// gets the effective parallel balance of an address
-    pub fn get_parallel_balance(&self, address: &Address) -> Option<Amount> {
-        self.speculative_ledger.get_parallel_balance(address)
+    /// gets the effective balance of an address
+    pub fn get_balance(&self, address: &Address) -> Option<Amount> {
+        self.speculative_ledger.get_balance(address)
     }
 
     /// Sets a datastore entry for an address in the speculative ledger.
@@ -424,7 +483,8 @@ impl ExecutionContext {
         }
 
         // set data entry
-        self.speculative_ledger.set_data_entry(address, key, data)
+        self.speculative_ledger
+            .set_data_entry(&self.get_current_address()?, address, key, data)
     }
 
     /// Appends data to a datastore entry for an address in the speculative ledger.
@@ -465,7 +525,7 @@ impl ExecutionContext {
 
         // set data entry
         self.speculative_ledger
-            .set_data_entry(address, key, res_data)
+            .set_data_entry(&self.get_current_address()?, address, key, res_data)
     }
 
     /// Deletes a datastore entry for an address.
@@ -482,16 +542,17 @@ impl ExecutionContext {
         // check access right
         if !self.has_write_rights_on(address) {
             return Err(ExecutionError::RuntimeError(format!(
-                "appending to the datastore of address {} is not allowed in this context",
+                "deleting from the datastore of address {} is not allowed in this context",
                 address
             )));
         }
 
         // delete entry
-        self.speculative_ledger.delete_data_entry(address, key)
+        self.speculative_ledger
+            .delete_data_entry(&self.get_current_address()?, address, key)
     }
 
-    /// Transfers parallel coins from one address to another.
+    /// Transfers coins from one address to another.
     /// No changes are retained in case of failure.
     /// Spending is only allowed from existing addresses we have write access on
     ///
@@ -499,24 +560,28 @@ impl ExecutionContext {
     /// * `from_addr`: optional spending address (use None for pure coin creation)
     /// * `to_addr`: optional crediting address (use None for pure coin destruction)
     /// * `amount`: amount of coins to transfer
-    pub fn transfer_parallel_coins(
+    /// * `check_rights`: check that the sender has the right to spend the coins according to the call stack
+    pub fn transfer_coins(
         &mut self,
         from_addr: Option<Address>,
         to_addr: Option<Address>,
         amount: Amount,
+        check_rights: bool,
     ) -> Result<(), ExecutionError> {
         // check access rights
-        if let Some(from_addr) = &from_addr {
-            if !self.has_write_rights_on(from_addr) {
-                return Err(ExecutionError::RuntimeError(format!(
-                    "spending from address {} is not allowed in this context",
-                    from_addr
-                )));
+        if check_rights {
+            if let Some(from_addr) = &from_addr {
+                if !self.has_write_rights_on(from_addr) {
+                    return Err(ExecutionError::RuntimeError(format!(
+                        "spending from address {} is not allowed in this context",
+                        from_addr
+                    )));
+                }
             }
         }
         // do the transfer
         self.speculative_ledger
-            .transfer_parallel_coins(from_addr, to_addr, amount)
+            .transfer_coins(from_addr, to_addr, amount)
     }
 
     /// Add a new asynchronous message to speculative pool
@@ -532,11 +597,75 @@ impl ExecutionContext {
     /// # Arguments
     /// * `msg`: the asynchronous message to cancel
     pub fn cancel_async_message(&mut self, msg: &AsyncMessage) {
-        if let Err(e) = self.transfer_parallel_coins(None, Some(msg.sender), msg.coins) {
+        if let Err(e) = self.transfer_coins(None, Some(msg.sender), msg.coins, false) {
             debug!(
                 "async message cancel: reimbursement of {} failed: {}",
                 msg.sender, e
             );
+        }
+    }
+
+    /// Add `roll_count` rolls to the buyer address.
+    /// Validity checks must be performed _outside_ of this function.
+    ///
+    /// # Arguments
+    /// * `buyer_addr`: address that will receive the rolls
+    /// * `roll_count`: number of rolls it will receive
+    pub fn add_rolls(&mut self, buyer_addr: &Address, roll_count: u64) {
+        self.speculative_roll_state
+            .add_rolls(buyer_addr, roll_count);
+    }
+
+    /// Try to sell `roll_count` rolls from the seller address.
+    ///
+    /// # Arguments
+    /// * `seller_addr`: address to sell the rolls from
+    /// * `roll_count`: number of rolls to sell
+    pub fn try_sell_rolls(
+        &mut self,
+        seller_addr: &Address,
+        roll_count: u64,
+    ) -> Result<(), ExecutionError> {
+        self.speculative_roll_state.try_sell_rolls(
+            seller_addr,
+            self.slot,
+            roll_count,
+            self.config.periods_per_cycle,
+            self.config.thread_count,
+            self.config.roll_price,
+        )
+    }
+
+    /// Update production statistics of an address.
+    ///
+    /// # Arguments
+    /// * `creator`: the supposed creator
+    /// * `slot`: current slot
+    /// * `block_id`: id of the block (if some)
+    pub fn update_production_stats(
+        &mut self,
+        creator: &Address,
+        slot: Slot,
+        block_id: Option<BlockId>,
+    ) {
+        self.speculative_roll_state
+            .update_production_stats(creator, slot, block_id);
+    }
+
+    /// Execute the deferred credits of `slot`.
+    ///
+    /// # Arguments
+    /// * `slot`: associated slot of the deferred credits to be executed
+    /// * `credits`: deferred to be executed
+    pub fn execute_deferred_credits(&mut self, slot: &Slot) {
+        let credits = self.speculative_roll_state.get_deferred_credits(slot);
+        for (addr, amount) in credits {
+            if let Err(e) = self.transfer_coins(None, Some(addr), amount, false) {
+                debug!(
+                    "could not credit {} deferred coins to {} at slot {}: {}",
+                    amount, addr, slot, e
+                );
+            }
         }
     }
 
@@ -548,19 +677,40 @@ impl ExecutionContext {
     /// This is used to get the output of an execution before discarding the context.
     /// Note that we are not taking self by value to consume it because the context is shared.
     pub fn settle_slot(&mut self) -> ExecutionOutput {
+        let slot = self.slot;
+
         // settle emitted async messages and reimburse the senders of deleted messages
-        let deleted_messages = self.speculative_async_pool.settle_slot(self.slot);
+        let deleted_messages = self.speculative_async_pool.settle_slot(&slot);
         for (_msg_id, msg) in deleted_messages {
             self.cancel_async_message(&msg);
+        }
+
+        // execute the deferred credits coming from roll sells
+        self.execute_deferred_credits(&slot);
+
+        // if the current slot is last in cycle check the production stats and act accordingly
+        if self
+            .slot
+            .is_last_of_cycle(self.config.periods_per_cycle, self.config.thread_count)
+        {
+            self.speculative_roll_state.settle_production_stats(
+                &slot,
+                self.config.periods_per_cycle,
+                self.config.thread_count,
+                self.config.roll_price,
+                self.config.max_miss_ratio,
+            );
         }
 
         // generate the execution output
         let state_changes = StateChanges {
             ledger_changes: self.speculative_ledger.take(),
             async_pool_changes: self.speculative_async_pool.take(),
+            pos_changes: self.speculative_roll_state.take(),
+            executed_ops_changes: self.speculative_executed_ops.take(),
         };
         ExecutionOutput {
-            slot: self.slot,
+            slot,
             block_id: std::mem::take(&mut self.opt_block_id),
             state_changes,
             events: std::mem::take(&mut self.events),
@@ -586,8 +736,17 @@ impl ExecutionContext {
             )));
         }
 
+        // We define that set the bytecode of a non-SC address is impossible to avoid problems for block creator.
+        // See: https://github.com/massalabs/massa/discussions/2952
+        if let Some(creator_address) = self.creator_address && &creator_address == address {
+            return Err(ExecutionError::RuntimeError(format!("
+                can't set the bytecode of address {} because this is not a smart contract address",
+                address)))
+        }
+
         // set data entry
-        self.speculative_ledger.set_bytecode(address, bytecode)
+        self.speculative_ledger
+            .set_bytecode(&self.get_current_address()?, address, bytecode)
     }
 
     /// Creates a new event but does not emit it.
@@ -604,6 +763,7 @@ impl ExecutionContext {
             read_only: self.read_only,
             index_in_slot: self.created_event_index,
             origin_operation_id: self.origin_operation_id,
+            is_final: false,
         };
 
         // Return the event
@@ -621,5 +781,45 @@ impl ExecutionContext {
 
         // Add the event to the context store
         self.events.push(event);
+    }
+
+    /// Check if an operation was previously executed (to prevent reuse)
+    pub fn is_op_executed(&self, op_id: &OperationId) -> bool {
+        self.speculative_executed_ops.is_op_executed(op_id)
+    }
+
+    /// Insert an executed operation.
+    /// Does not check for reuse, please use `is_op_executed` before.
+    ///
+    /// # Arguments
+    /// * `op_id`: operation ID
+    /// * `op_valid_until_slot`: slot until which the operation remains valid (included)
+    pub fn insert_executed_op(&mut self, op_id: OperationId, op_valid_until_slot: Slot) {
+        self.speculative_executed_ops
+            .insert_executed_op(op_id, op_valid_until_slot)
+    }
+
+    /// gets the cycle information for an address
+    pub fn get_address_cycle_infos(
+        &self,
+        address: &Address,
+        periods_per_cycle: u64,
+    ) -> Vec<ExecutionAddressCycleInfo> {
+        self.speculative_roll_state
+            .get_address_cycle_infos(address, periods_per_cycle, self.slot)
+    }
+
+    /// Get future deferred credits of an address
+    pub fn get_address_future_deferred_credits(
+        &self,
+        address: &Address,
+        thread_count: u8,
+    ) -> BTreeMap<Slot, Amount> {
+        let min_slot = self
+            .slot
+            .get_next_slot(thread_count)
+            .expect("unexpected slot overflow in context.get_addresses_deferred_credits");
+        self.speculative_roll_state
+            .get_address_deferred_credits(address, min_slot)
     }
 }

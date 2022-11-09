@@ -53,10 +53,10 @@ mod types;
 pub use controller_traits::{ExecutionController, ExecutionManager};
 pub use error::ExecutionError;
 pub use event_store::EventStore;
-pub use settings::ExecutionConfig;
+pub use settings::{ExecutionConfig, StorageCostsConstants};
 pub use types::{
-    ExecutionOutput, ExecutionStackElement, ReadOnlyCallRequest, ReadOnlyExecutionRequest,
-    ReadOnlyExecutionTarget,
+    ExecutionAddressInfo, ExecutionOutput, ExecutionStackElement, ReadOnlyCallRequest,
+    ReadOnlyExecutionOutput, ReadOnlyExecutionRequest, ReadOnlyExecutionTarget,
 };
 
 #[cfg(feature = "testing")]

@@ -2,15 +2,32 @@
 
 //! This file defines utilities to mock the crate for testing purposes
 
-use crate::{ExecutionController, ExecutionError, ExecutionOutput, ReadOnlyExecutionRequest};
+use crate::{
+    ExecutionAddressInfo, ExecutionController, ExecutionError, ReadOnlyExecutionOutput,
+    ReadOnlyExecutionRequest,
+};
 use massa_ledger_exports::LedgerEntry;
-use massa_models::{api::EventFilter, output_event::SCOutputEvent, Address, Amount, BlockId, Slot};
+use massa_models::{
+    address::Address,
+    amount::Amount,
+    api::EventFilter,
+    block::BlockId,
+    operation::OperationId,
+    output_event::SCOutputEvent,
+    prehash::{PreHashMap, PreHashSet},
+    slot::Slot,
+    stats::ExecutionStats,
+};
+use massa_storage::Storage;
+use massa_time::MassaTime;
+use parking_lot::Mutex;
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeMap, HashMap},
     sync::{
         mpsc::{self, Receiver},
-        Arc, Mutex,
+        Arc,
     },
+    time::Duration,
 };
 
 /// List of possible messages coming from the mock.
@@ -24,8 +41,10 @@ pub enum MockExecutionControllerMessage {
     UpdateBlockcliqueStatus {
         /// newly finalized blocks
         finalized_blocks: HashMap<Slot, BlockId>,
-        /// current clique of higher fitness
-        blockclique: HashMap<Slot, BlockId>,
+        /// blockclique change
+        new_blockclique: Option<HashMap<Slot, BlockId>>,
+        /// block storage
+        block_storage: PreHashMap<BlockId, Storage>,
     },
     /// filter for smart contract output event request
     GetFilteredScOutputEvent {
@@ -46,7 +65,23 @@ pub enum MockExecutionControllerMessage {
         /// read only execution request
         req: ReadOnlyExecutionRequest,
         /// response channel
-        response_tx: mpsc::Sender<Result<ExecutionOutput, ExecutionError>>,
+        response_tx: mpsc::Sender<Result<ReadOnlyExecutionOutput, ExecutionError>>,
+    },
+    /// Not executed operation among call
+    UnexecutedOpsAmong {
+        /// operation ids
+        ops: PreHashSet<OperationId>,
+        /// thread
+        thread: u8,
+        /// response channel
+        response_tx: mpsc::Sender<PreHashSet<OperationId>>,
+    },
+    /// Get final and candidate balances by addresses
+    GetFinalAndCandidateBalance {
+        /// addresses to get
+        addresses: Vec<Address>,
+        /// response channel
+        response_tx: mpsc::Sender<Vec<(Option<Amount>, Option<Amount>)>>,
     },
 }
 
@@ -78,17 +113,29 @@ impl MockExecutionController {
 /// a response from that channel is read and returned as return value.
 /// See the documentation of `ExecutionController` for details on each function.
 impl ExecutionController for MockExecutionController {
+    /// Get execution statistics
+    fn get_stats(&self) -> ExecutionStats {
+        ExecutionStats {
+            time_window_start: MassaTime::now(0).unwrap(),
+            time_window_end: MassaTime::now(0).unwrap(),
+            final_block_count: 0,
+            final_executed_operations_count: 0,
+            active_cursor: Slot::new(0, 0),
+        }
+    }
+
     fn update_blockclique_status(
         &self,
         finalized_blocks: HashMap<Slot, BlockId>,
-        blockclique: HashMap<Slot, BlockId>,
+        new_blockclique: Option<HashMap<Slot, BlockId>>,
+        block_storage: PreHashMap<BlockId, Storage>,
     ) {
         self.0
             .lock()
-            .unwrap()
             .send(MockExecutionControllerMessage::UpdateBlockcliqueStatus {
                 finalized_blocks,
-                blockclique,
+                new_blockclique,
+                block_storage,
             })
             .unwrap();
     }
@@ -97,7 +144,6 @@ impl ExecutionController for MockExecutionController {
         let (response_tx, response_rx) = mpsc::channel();
         self.0
             .lock()
-            .unwrap()
             .send(MockExecutionControllerMessage::GetFilteredScOutputEvent {
                 filter,
                 response_tx,
@@ -106,11 +152,22 @@ impl ExecutionController for MockExecutionController {
         response_rx.recv().unwrap()
     }
 
-    fn get_final_and_active_parallel_balance(
+    fn get_final_and_candidate_balance(
         &self,
-        _address: Vec<Address>,
+        addresses: &[Address],
     ) -> Vec<(Option<Amount>, Option<Amount>)> {
-        Vec::default()
+        let (response_tx, response_rx) = mpsc::channel();
+        if let Err(err) = self.0.lock().send(
+            MockExecutionControllerMessage::GetFinalAndCandidateBalance {
+                addresses: addresses.to_vec(),
+                response_tx,
+            },
+        ) {
+            println!("mock error {err}");
+        }
+        response_rx
+            .recv_timeout(Duration::from_millis(100))
+            .unwrap()
     }
 
     fn get_final_and_active_data_entry(
@@ -120,24 +177,46 @@ impl ExecutionController for MockExecutionController {
         Vec::default()
     }
 
-    fn get_final_and_active_datastore_keys(
-        &self,
-        _addr: &Address,
-    ) -> (BTreeSet<Vec<u8>>, BTreeSet<Vec<u8>>) {
-        (BTreeSet::default(), BTreeSet::default())
+    fn get_addresses_infos(&self, _addresses: &[Address]) -> Vec<ExecutionAddressInfo> {
+        Vec::default()
+    }
+
+    fn get_cycle_active_rolls(&self, _cycle: u64) -> BTreeMap<Address, u64> {
+        BTreeMap::default()
     }
 
     fn execute_readonly_request(
         &self,
         req: ReadOnlyExecutionRequest,
-    ) -> Result<ExecutionOutput, ExecutionError> {
+    ) -> Result<ReadOnlyExecutionOutput, ExecutionError> {
         let (response_tx, response_rx) = mpsc::channel();
         self.0
             .lock()
-            .unwrap()
             .send(MockExecutionControllerMessage::ExecuteReadonlyRequest { req, response_tx })
             .unwrap();
         response_rx.recv().unwrap()
+    }
+
+    fn unexecuted_ops_among(
+        &self,
+        ops: &PreHashSet<OperationId>,
+        thread: u8,
+    ) -> PreHashSet<OperationId> {
+        let (response_tx, response_rx) = mpsc::channel();
+        if let Err(err) = self
+            .0
+            .lock()
+            .send(MockExecutionControllerMessage::UnexecutedOpsAmong {
+                ops: ops.clone(),
+                thread,
+                response_tx,
+            })
+        {
+            println!("mock error {err}");
+        }
+        response_rx
+            .recv_timeout(Duration::from_millis(100))
+            .unwrap()
     }
 
     fn clone_box(&self) -> Box<dyn ExecutionController> {

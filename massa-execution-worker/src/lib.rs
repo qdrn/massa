@@ -44,6 +44,11 @@
 //! It sequences the blocks according to their slot number into queues,
 //! and requests the execution of active and final slots to execution.rs.
 //!
+//! ## slot_sequencer.rs
+//! Implements `SlotSequencer`
+//! that allows sequencing slots for execution.
+//!
+//!
 //! ## controller.rs
 //! Implements `ExecutionManager` and `ExecutionController`
 //! that serve as interfaces for users to interact with the worker in worker.rs.
@@ -61,14 +66,21 @@
 //! A speculative (non-final) ledger that supports canceling already-executed operations
 //! in the case of some blockclique changes.
 //!
+//! ## `speculative_executed_ops.rs`
+//! A speculative (non-final) list of previously executed operations to prevent reuse.
+//!
 //! ## `request_queue.rs`
 //! This module contains the implementation of a generic finite-size execution request queue.
 //! It handles requests that come with an MPSC to send back the result of their execution once it's done.
 //!
+//! ## `stats.rs`
+//! Defines a structure that gathers execution statistics.
 
 #![warn(missing_docs)]
 #![warn(unused_crate_dependencies)]
 #![feature(is_sorted)]
+#![feature(map_try_insert)]
+#![feature(let_chains)]
 
 mod active_history;
 mod context;
@@ -76,8 +88,12 @@ mod controller;
 mod execution;
 mod interface_impl;
 mod request_queue;
+mod slot_sequencer;
 mod speculative_async_pool;
+mod speculative_executed_ops;
 mod speculative_ledger;
+mod speculative_roll_state;
+mod stats;
 mod worker;
 
 pub use worker::start_execution_worker;

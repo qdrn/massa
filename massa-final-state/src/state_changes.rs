@@ -5,7 +5,11 @@
 use massa_async_pool::{
     AsyncPoolChanges, AsyncPoolChangesDeserializer, AsyncPoolChangesSerializer,
 };
+use massa_executed_ops::{
+    ExecutedOpsChanges, ExecutedOpsChangesDeserializer, ExecutedOpsChangesSerializer,
+};
 use massa_ledger_exports::{LedgerChanges, LedgerChangesDeserializer, LedgerChangesSerializer};
+use massa_pos_exports::{PoSChanges, PoSChangesDeserializer, PoSChangesSerializer};
 use massa_serialization::{Deserializer, SerializeError, Serializer};
 use nom::{
     error::{context, ContextError, ParseError},
@@ -14,28 +18,24 @@ use nom::{
 };
 
 /// represents changes that can be applied to the execution state
-#[derive(Default, Debug, Clone, PartialEq, Eq)]
+#[derive(Default, Debug, Clone)]
 pub struct StateChanges {
     /// ledger changes
     pub ledger_changes: LedgerChanges,
     /// asynchronous pool changes
     pub async_pool_changes: AsyncPoolChanges,
+    /// roll state changes
+    pub pos_changes: PoSChanges,
+    /// executed operations changes
+    pub executed_ops_changes: ExecutedOpsChanges,
 }
 
 /// Basic `StateChanges` serializer.
 pub struct StateChangesSerializer {
     ledger_changes_serializer: LedgerChangesSerializer,
     async_pool_changes_serializer: AsyncPoolChangesSerializer,
-}
-
-impl StateChangesSerializer {
-    /// Creates a `StateChangesSerializer`
-    pub fn new() -> Self {
-        Self {
-            ledger_changes_serializer: LedgerChangesSerializer::new(),
-            async_pool_changes_serializer: AsyncPoolChangesSerializer::new(),
-        }
-    }
+    pos_changes_serializer: PoSChangesSerializer,
+    ops_changes_serializer: ExecutedOpsChangesSerializer,
 }
 
 impl Default for StateChangesSerializer {
@@ -44,10 +44,23 @@ impl Default for StateChangesSerializer {
     }
 }
 
+impl StateChangesSerializer {
+    /// Creates a `StateChangesSerializer`
+    pub fn new() -> Self {
+        Self {
+            ledger_changes_serializer: LedgerChangesSerializer::new(),
+            async_pool_changes_serializer: AsyncPoolChangesSerializer::new(),
+            pos_changes_serializer: PoSChangesSerializer::new(),
+            ops_changes_serializer: ExecutedOpsChangesSerializer::new(),
+        }
+    }
+}
+
 impl Serializer<StateChanges> for StateChangesSerializer {
+    /// ## Example
     /// ```
     /// use massa_serialization::Serializer;
-    /// use massa_models::{Address, Amount, Slot};
+    /// use massa_models::{address::Address, amount::Amount, slot::Slot};
     /// use massa_final_state::{StateChanges, StateChangesSerializer};
     /// use std::str::FromStr;
     /// use std::collections::BTreeMap;
@@ -74,7 +87,7 @@ impl Serializer<StateChanges> for StateChangesSerializer {
     /// let amount = Amount::from_str("1").unwrap();
     /// let bytecode = vec![1, 2, 3];
     /// let ledger_entry = LedgerEntryUpdate {
-    ///    parallel_balance: SetOrKeep::Set(amount),
+    ///    balance: SetOrKeep::Set(amount),
     ///    bytecode: SetOrKeep::Set(bytecode),
     ///    datastore: BTreeMap::default(),
     /// };
@@ -92,6 +105,10 @@ impl Serializer<StateChanges> for StateChangesSerializer {
             .serialize(&value.ledger_changes, buffer)?;
         self.async_pool_changes_serializer
             .serialize(&value.async_pool_changes, buffer)?;
+        self.pos_changes_serializer
+            .serialize(&value.pos_changes, buffer)?;
+        self.ops_changes_serializer
+            .serialize(&value.executed_ops_changes, buffer)?;
         Ok(())
     }
 }
@@ -100,28 +117,57 @@ impl Serializer<StateChanges> for StateChangesSerializer {
 pub struct StateChangesDeserializer {
     ledger_changes_deserializer: LedgerChangesDeserializer,
     async_pool_changes_deserializer: AsyncPoolChangesDeserializer,
+    pos_changes_deserializer: PoSChangesDeserializer,
+    ops_changes_deserializer: ExecutedOpsChangesDeserializer,
 }
 
 impl StateChangesDeserializer {
     /// Creates a `StateChangesDeserializer`
-    pub fn new() -> Self {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        thread_count: u8,
+        max_async_pool_changes: u64,
+        max_async_message_data: u64,
+        max_ledger_changes_count: u64,
+        max_datastore_key_length: u8,
+        max_datastore_value_length: u64,
+        max_datastore_entry_count: u64,
+        max_rolls_length: u64,
+        max_production_stats_length: u64,
+        max_credits_length: u64,
+        max_ops_changes_length: u64,
+    ) -> Self {
         Self {
-            ledger_changes_deserializer: LedgerChangesDeserializer::new(),
-            async_pool_changes_deserializer: AsyncPoolChangesDeserializer::new(),
+            ledger_changes_deserializer: LedgerChangesDeserializer::new(
+                max_ledger_changes_count,
+                max_datastore_key_length,
+                max_datastore_value_length,
+                max_datastore_entry_count,
+            ),
+            async_pool_changes_deserializer: AsyncPoolChangesDeserializer::new(
+                thread_count,
+                max_async_pool_changes,
+                max_async_message_data,
+            ),
+            pos_changes_deserializer: PoSChangesDeserializer::new(
+                thread_count,
+                max_rolls_length,
+                max_production_stats_length,
+                max_credits_length,
+            ),
+            ops_changes_deserializer: ExecutedOpsChangesDeserializer::new(
+                thread_count,
+                max_ops_changes_length,
+            ),
         }
     }
 }
 
-impl Default for StateChangesDeserializer {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl Deserializer<StateChanges> for StateChangesDeserializer {
+    /// ## Example
     /// ```
     /// use massa_serialization::{Serializer, Deserializer, DeserializeError};
-    /// use massa_models::{Address, prehash::Map, Amount, Slot};
+    /// use massa_models::{address::Address, prehash::PreHashMap, amount::Amount, slot::Slot};
     /// use massa_final_state::{StateChanges, StateChangesSerializer, StateChangesDeserializer};
     /// use std::str::FromStr;
     /// use std::collections::BTreeMap;
@@ -148,7 +194,7 @@ impl Deserializer<StateChanges> for StateChangesDeserializer {
     /// let amount = Amount::from_str("1").unwrap();
     /// let bytecode = vec![1, 2, 3];
     /// let ledger_entry = LedgerEntryUpdate {
-    ///    parallel_balance: SetOrKeep::Set(amount),
+    ///    balance: SetOrKeep::Set(amount),
     ///    bytecode: SetOrKeep::Set(bytecode),
     ///    datastore: BTreeMap::default(),
     /// };
@@ -160,9 +206,10 @@ impl Deserializer<StateChanges> for StateChangesDeserializer {
     /// state_changes.ledger_changes = ledger_changes;
     /// let mut serialized = Vec::new();
     /// StateChangesSerializer::new().serialize(&state_changes, &mut serialized).unwrap();
-    /// let (rest, state_changes_deser) = StateChangesDeserializer::new().deserialize::<DeserializeError>(&serialized).unwrap();
+    /// let (rest, state_changes_deser) = StateChangesDeserializer::new(32, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255).deserialize::<DeserializeError>(&serialized).unwrap();
     /// assert!(rest.is_empty());
-    /// assert_eq!(state_changes_deser, state_changes);
+    /// assert_eq!(state_changes_deser.ledger_changes, state_changes.ledger_changes);
+    /// assert_eq!(state_changes_deser.async_pool_changes, state_changes.async_pool_changes);
     /// ```
     fn deserialize<'a, E: ParseError<&'a [u8]> + ContextError<&'a [u8]>>(
         &self,
@@ -177,12 +224,22 @@ impl Deserializer<StateChanges> for StateChangesDeserializer {
                 context("Failed async_pool_changes deserialization", |input| {
                     self.async_pool_changes_deserializer.deserialize(input)
                 }),
+                context("Failed roll_state_changes deserialization", |input| {
+                    self.pos_changes_deserializer.deserialize(input)
+                }),
+                context("Failed executed_ops_changes deserialization", |input| {
+                    self.ops_changes_deserializer.deserialize(input)
+                }),
             )),
         )
-        .map(|(ledger_changes, async_pool_changes)| StateChanges {
-            ledger_changes,
-            async_pool_changes,
-        })
+        .map(
+            |(ledger_changes, async_pool_changes, roll_state_changes, executed_ops)| StateChanges {
+                ledger_changes,
+                async_pool_changes,
+                pos_changes: roll_state_changes,
+                executed_ops_changes: executed_ops,
+            },
+        )
         .parse(buffer)
     }
 }
@@ -193,5 +250,8 @@ impl StateChanges {
         use massa_ledger_exports::Applicable;
         self.ledger_changes.apply(changes.ledger_changes);
         self.async_pool_changes.extend(changes.async_pool_changes);
+        self.pos_changes.extend(changes.pos_changes);
+        self.executed_ops_changes
+            .extend(changes.executed_ops_changes);
     }
 }

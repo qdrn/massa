@@ -3,13 +3,21 @@
 //! This file defines the final ledger associating addresses to their balances, bytecode and data.
 
 use crate::ledger_db::{LedgerDB, LedgerSubEntry};
+use massa_hash::Hash;
 use massa_ledger_exports::{
     LedgerChanges, LedgerConfig, LedgerController, LedgerEntry, LedgerError,
 };
-use massa_models::{Address, Amount, ModelsError};
-use massa_models::{DeserializeCompact, Slot};
+use massa_models::{
+    address::Address,
+    amount::{Amount, AmountDeserializer},
+    error::ModelsError,
+    slot::Slot,
+    streaming_step::StreamingStep,
+};
+use massa_serialization::{DeserializeError, Deserializer};
 use nom::AsBytes;
 use std::collections::{BTreeSet, HashMap};
+use std::ops::Bound::Included;
 
 /// Represents a final ledger associating addresses to their balances, bytecode and data.
 /// The final ledger is part of the final state which is attached to a final slot, can be bootstrapped and allows others to bootstrap.
@@ -18,58 +26,27 @@ use std::collections::{BTreeSet, HashMap};
 #[derive(Debug)]
 pub struct FinalLedger {
     /// ledger configuration
-    pub(crate) _config: LedgerConfig,
+    pub(crate) config: LedgerConfig,
     /// ledger tree, sorted by address
     pub(crate) sorted_ledger: LedgerDB,
 }
 
-/// Macro used to shorten file error returns
-macro_rules! init_file_error {
-    ($st:expr, $cfg:ident) => {
-        |err| {
-            LedgerError::FileError(format!(
-                "error $st initial ledger file {}: {}",
-                $cfg.initial_sce_ledger_path
-                    .to_str()
-                    .unwrap_or("(non-utf8 path)"),
-                err
-            ))
-        }
-    };
-}
-pub(crate) use init_file_error;
-
 impl FinalLedger {
     /// Initializes a new `FinalLedger` by reading its initial state from file.
-    pub fn new(config: LedgerConfig) -> Result<Self, LedgerError> {
-        // load the ledger tree from file
-        let initial_ledger: HashMap<Address, LedgerEntry> =
-            serde_json::from_str::<HashMap<Address, Amount>>(
-                &std::fs::read_to_string(&config.initial_sce_ledger_path)
-                    .map_err(init_file_error!("loading", config))?,
-            )
-            .map_err(init_file_error!("parsing", config))?
-            .into_iter()
-            .map(|(addr, amount)| {
-                (
-                    addr,
-                    LedgerEntry {
-                        parallel_balance: amount,
-                        ..Default::default()
-                    },
-                )
-            })
-            .collect();
-
+    pub fn new(config: LedgerConfig) -> Self {
         // create and initialize the disk ledger
-        let mut sorted_ledger = LedgerDB::new(config.disk_ledger_path.clone());
-        sorted_ledger.set_initial_ledger(initial_ledger);
+        let sorted_ledger = LedgerDB::new(
+            config.disk_ledger_path.clone(),
+            config.thread_count,
+            config.max_key_length,
+            config.max_ledger_part_size,
+        );
 
         // generate the final ledger
-        Ok(FinalLedger {
+        FinalLedger {
             sorted_ledger,
-            _config: config,
-        })
+            config,
+        }
     }
 }
 
@@ -79,17 +56,49 @@ impl LedgerController for FinalLedger {
         self.sorted_ledger.apply_changes(changes, slot);
     }
 
-    /// Gets the parallel balance of a ledger entry
+    /// Loads ledger from file
+    fn load_initial_ledger(&mut self) -> Result<(), LedgerError> {
+        // load the ledger tree from file
+        let initial_ledger: HashMap<Address, LedgerEntry> = serde_json::from_str(
+            &std::fs::read_to_string(&self.config.initial_ledger_path).map_err(|err| {
+                LedgerError::FileError(format!(
+                    "error loading initial ledger file {}: {}",
+                    self.config
+                        .initial_ledger_path
+                        .to_str()
+                        .unwrap_or("(non-utf8 path)"),
+                    err
+                ))
+            })?,
+        )
+        .map_err(|err| {
+            LedgerError::FileError(format!(
+                "error parsing initial ledger file {}: {}",
+                self.config
+                    .initial_ledger_path
+                    .to_str()
+                    .unwrap_or("(non-utf8 path)"),
+                err
+            ))
+        })?;
+        self.sorted_ledger.load_initial_ledger(initial_ledger);
+        Ok(())
+    }
+
+    /// Gets the balance of a ledger entry
     ///
     /// # Returns
-    /// The parallel balance, or None if the ledger entry was not found
-    fn get_parallel_balance(&self, addr: &Address) -> Option<Amount> {
+    /// The balance, or None if the ledger entry was not found
+    fn get_balance(&self, addr: &Address) -> Option<Amount> {
+        let amount_deserializer =
+            AmountDeserializer::new(Included(Amount::MIN), Included(Amount::MAX));
         self.sorted_ledger
             .get_sub_entry(addr, LedgerSubEntry::Balance)
             .map(|bytes| {
-                Amount::from_bytes_compact(&bytes)
+                amount_deserializer
+                    .deserialize::<DeserializeError>(&bytes)
                     .expect("critical: invalid balance format")
-                    .0
+                    .1
             })
     }
 
@@ -142,9 +151,14 @@ impl LedgerController for FinalLedger {
     /// Get every key of the datastore for a given address.
     ///
     /// # Returns
-    /// A BTreeSet of the datastore keys
+    /// A `BTreeSet` of the datastore keys
     fn get_datastore_keys(&self, addr: &Address) -> BTreeSet<Vec<u8>> {
         self.sorted_ledger.get_datastore_keys(addr)
+    }
+
+    /// Get the current disk ledger hash
+    fn get_ledger_hash(&self) -> Hash {
+        self.sorted_ledger.get_ledger_hash()
     }
 
     /// Get a part of the disk ledger.
@@ -155,8 +169,8 @@ impl LedgerController for FinalLedger {
     /// A tuple containing the data and the last returned key
     fn get_ledger_part(
         &self,
-        last_key: &Option<Vec<u8>>,
-    ) -> Result<(Vec<u8>, Option<Vec<u8>>), ModelsError> {
+        last_key: StreamingStep<Vec<u8>>,
+    ) -> Result<(Vec<u8>, StreamingStep<Vec<u8>>), ModelsError> {
         self.sorted_ledger.get_ledger_part(last_key)
     }
 
@@ -166,7 +180,7 @@ impl LedgerController for FinalLedger {
     ///
     /// # Returns
     /// The last key inserted
-    fn set_ledger_part(&self, data: Vec<u8>) -> Result<Option<Vec<u8>>, ModelsError> {
+    fn set_ledger_part(&self, data: Vec<u8>) -> Result<StreamingStep<Vec<u8>>, ModelsError> {
         self.sorted_ledger.set_ledger_part(data.as_bytes())
     }
 
@@ -175,7 +189,7 @@ impl LedgerController for FinalLedger {
     /// IMPORTANT: This should only be used for debug and test purposes.
     ///
     /// # Returns
-    /// A BTreeMap with the address as key and the balance as value
+    /// A `BTreeMap` with the address as key and the balance as value
     #[cfg(feature = "testing")]
     fn get_every_address(&self) -> std::collections::BTreeMap<Address, Amount> {
         self.sorted_ledger.get_every_address()
@@ -186,7 +200,7 @@ impl LedgerController for FinalLedger {
     /// IMPORTANT: This should only be used for debug purposes.
     ///
     /// # Returns
-    /// A BTreeMap with the entry hash as key and the data bytes as value
+    /// A `BTreeMap` with the entry hash as key and the data bytes as value
     #[cfg(feature = "testing")]
     fn get_entire_datastore(&self, addr: &Address) -> std::collections::BTreeMap<Vec<u8>, Vec<u8>> {
         self.sorted_ledger.get_entire_datastore(addr)

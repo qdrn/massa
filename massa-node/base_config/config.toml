@@ -13,6 +13,8 @@
     bind_public = "0.0.0.0:33035"
     # max number of arguments per RPC call
     max_arguments = 128
+    # Path to the openrpc specification file used in `rpc.discover` method.
+    openrpc_spec_path = "base_config/openrpc.json"
 
 [execution]
     # max number of generated events kept in RAM
@@ -22,10 +24,12 @@
     # by how many milliseconds shoud the execution lag behind real time
     # higher values increase speculative execution lag but improve performance
     cursor_delay = 2000
+    # duration of the statistics time window in milliseconds
+    stats_time_window_duration = 60000
 
 [ledger]
-    # path to the initial smart contract balance ledger
-    initial_sce_ledger_path = "base_config/initial_sce_ledger.json"
+    # path to the initial ledger
+    initial_ledger_path = "base_config/initial_ledger.json"
     # path to the disk ledger db directory
     disk_ledger_path = "storage/ledger/rocks_db"
     # length of the changes history. Higher values allow bootstrapping nodes with slower connections
@@ -41,36 +45,13 @@
     # max number of blocks waiting for dependencies
     max_dependency_blocks = 2048
     # number of final periods that must be kept at all times (increase to more resilience to short network disconnections, high values will increase RAM usage.)
-    force_keep_final_periods = 20
-
-    # max number of batches of pool operations to scan when generating a block
-    max_operations_fill_attempts = 102400
-    # size of a pool operation batch for block creation
-    operation_batch_size = 2048
-
-    # path to the ledger file
-    ledger_path = "storage/ledger"
-    # size of the ledger kept in cache
-    ledger_cache_capacity = 1048576
-    # [optionnal] the ledger is saved on disk every ledger_flush_interval
-    ledger_flush_interval = 10000
-    # whether to overwrite the ledger at start
-    ledger_reset_at_startup = true
-    # path to the initial consensus balance ledger
-    initial_ledger_path = "base_config/initial_ledger.json"
+    force_keep_final_periods = 10
 
     # max milliseconds to wait while sending an event before dropping it
     max_send_wait = 0
     # useless blocks are pruned every block_db_prune_interval ms
     block_db_prune_interval = 5000
 
-    # path to the initial roll distribution
-    initial_rolls_path = "base_config/initial_rolls.json"
-    # number of cycles cached by the proof-of-stake selection system
-    pos_draw_cached_cycles = 10
-
-    # path to your staking keys (not encrypted)
-    staking_keys_path = "config/staking_keys.json"
     # considered timespan for stats info
     stats_timespan = 60000
     # max number of item returned per query
@@ -92,22 +73,30 @@
     # max milliseconds to wait while sending an event before dropping it
     max_send_wait = 0
     # max cache size for which operations your node knows about
-    max_known_ops_size = 200000
+    max_known_ops_size = 2000000
     # max cache size for which operations a foreign node knows about
-    max_node_known_ops_size = 20000
+    max_node_known_ops_size = 200000
     # max cache size for which endorsements our node knows about
-    max_known_endorsements_size = 1024
+    max_known_endorsements_size = 2048
     # max cache size for which endorsements a foreign node knows about
-    max_node_known_endorsements_size = 1024
+    max_node_known_endorsements_size = 2048
     # Maximum number of batches in the memory buffer.
     # Dismiss the new batches if overflow
     operation_batch_buffer_capacity = 10024
+    # Immediately announce ops if overflow
+    operation_announcement_buffer_capacity = 2000
     # Start processing batches in the buffer each `operation_batch_proc_period` in millisecond
     operation_batch_proc_period = 500
     # All operations asked are prune each `operation_asked_pruning_period` millisecond
     asked_operations_pruning_period = 100000
+    # Interval at which operations are announced in batches.
+    operation_announcement_interval = 300
     # Max number of operation per message, same as network param but can be smaller
     max_operations_per_message = 1024
+    # Time threshold after which operation are not propagated
+    max_operations_propagation_time = 32000
+    # Time threshold after which operation are not propagated
+    max_endorsements_propagation_time = 48000
 
 [network]
     # port on which to listen for protocol communication
@@ -129,15 +118,15 @@
     # max number of stored banned peers
     max_banned_peers = 100
     # max number of advertized peers
-    max_advertise_length = 10000
+    max_advertise_length = 5000
     # peers are dumped to file every peers_file_dump_interval milliseconds
-    peers_file_dump_interval = 10000
+    peers_file_dump_interval = 30000
     # max size of sent messages
     max_message_size = 1048576000
     # timeout when waiting for a message from a foreign node
     message_timeout = 5000
     # interval in milliseconds for asking peer lists from peers we are connected to
-    ask_peer_list_interval = 30000
+    ask_peer_list_interval = 600000
     # path to the node key (not the staking key)
     keypair_file = "config/node_privkey.key"
     # max number of asked blocks per message
@@ -146,8 +135,10 @@
     max_operations_per_message = 1024
     # max number of endorsements per message
     max_endorsements_per_message = 1024
-    # max milliseconds to wait while sending an event before dropping it
-    max_send_wait = 0
+    # max milliseconds to wait while sending a node event before dropping it
+    max_send_wait_node_event = 5_000
+    # max milliseconds to wait while sending a network event before dropping it
+    max_send_wait_network_event = 0
     # we forget we banned a node after ban_timeout milliseconds
     ban_timeout = 3600000
     # Timeout duration when in handshake we respond with a PeerList
@@ -178,6 +169,10 @@
         ["54.36.174.177:31245", "P1gEdBVEbRFbBxBtrjcTDDK9JPbJFDay27uiJRE3vmbFAFDKNh7"],
         ["51.75.60.228:31245", "P13Ykon8Zo73PTKMruLViMMtE2rEG646JQ4sCcee2DnopmVM3P5"]
     ]
+    # Path to the bootstrap whitelist file. This whitelist define IPs that can bootstrap on your node.
+    bootstrap_whitelist_file = "base_config/bootstrap_whitelist.json"
+    # Path to the bootstrap blacklist file. This whitelist define IPs that will not be able to bootstrap on your node. This list is optional.
+    bootstrap_blacklist_file = "base_config/bootstrap_blacklist.json"
     # [optionnal] port on which to listen for incoming bootstrap requests
     bind = "[::]:31245"
     # timeout to establish a bootstrap connection
@@ -216,3 +211,15 @@
     max_endorsement_count = 10000
     # max number of items returned per query
     max_item_return_count = 100
+
+[selector]
+    # Maximum number of computed cycle's draws we keep in cache
+    max_draw_cache = 10
+    # Path to the initial roll distribution
+    initial_rolls_path = "base_config/initial_rolls.json"
+
+[factory]
+    # initial delay in milliseconds to wait before starting productin to avoid double staking on node restart
+    initial_delay = 100
+    # path to your staking wallet
+    staking_wallet_path = "config/staking_wallet.dat"

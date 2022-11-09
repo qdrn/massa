@@ -3,7 +3,7 @@
 use std::{cmp::Reverse, collections::BTreeMap, str::FromStr};
 
 use crate::{AsyncMessage, AsyncPool, AsyncPoolConfig};
-use massa_models::{constants::THREAD_COUNT, Address, Amount, Slot};
+use massa_models::{address::Address, amount::Amount, config::THREAD_COUNT, slot::Slot};
 use massa_signature::KeyPair;
 use rand::Rng;
 
@@ -27,14 +27,14 @@ fn get_random_address() -> Address {
 pub fn get_random_message() -> AsyncMessage {
     let mut rng = rand::thread_rng();
     AsyncMessage {
-        emission_slot: Slot::new(rng.gen_range(0..u64::MAX), rng.gen_range(0..THREAD_COUNT)),
+        emission_slot: Slot::new(rng.gen_range(0..100_000), rng.gen_range(0..THREAD_COUNT)),
         emission_index: 0,
         sender: get_random_address(),
         destination: get_random_address(),
         handler: String::from("test"),
-        max_gas: rng.gen::<u64>(),
-        gas_price: Amount::from_str("100000").unwrap(),
-        coins: Amount::from_str("100000").unwrap(),
+        max_gas: 10_000,
+        gas_price: Amount::from_str("100").unwrap(),
+        coins: Amount::from_str("100").unwrap(),
         validity_start: Slot::new(2, 0),
         validity_end: Slot::new(4, 0),
         data: vec![1, 2, 3],

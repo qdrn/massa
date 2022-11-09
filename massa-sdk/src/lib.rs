@@ -16,9 +16,11 @@ use massa_models::composite::PubkeySig;
 use massa_models::execution::ExecuteReadOnlyResponse;
 use massa_models::node::NodeId;
 use massa_models::output_event::SCOutputEvent;
-use massa_models::prehash::{Map, Set};
-use massa_models::{Address, BlockId, EndorsementId, OperationId};
-use massa_signature::KeyPair;
+use massa_models::prehash::{PreHashMap, PreHashSet};
+use massa_models::{
+    address::Address, block::BlockId, endorsement::EndorsementId, operation::OperationId,
+};
+
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::net::{IpAddr, SocketAddr};
@@ -97,10 +99,10 @@ impl RpcClient {
             .await
     }
 
-    /// Add a vector of new keypair for the node to use to stake.
+    /// Add a vector of new secret keys for the node to use to stake.
     /// No confirmation to expect.
-    pub async fn add_staking_secret_keys(&self, keypairs: Vec<KeyPair>) -> RpcResult<()> {
-        self.call_method("add_staking_secret_keys", "()", vec![keypairs])
+    pub async fn add_staking_secret_keys(&self, secret_keys: Vec<String>) -> RpcResult<()> {
+        self.call_method("add_staking_secret_keys", "()", vec![secret_keys])
             .await
     }
 
@@ -112,7 +114,7 @@ impl RpcClient {
     }
 
     /// Return hash-set of staking addresses.
-    pub async fn get_staking_addresses(&self) -> RpcResult<Set<Address>> {
+    pub async fn get_staking_addresses(&self) -> RpcResult<PreHashSet<Address>> {
         self.call_method("get_staking_addresses", "Set<Address>", ())
             .await
     }
@@ -129,13 +131,13 @@ impl RpcClient {
         self.call_method("node_ban_by_id", "()", vec![ids]).await
     }
 
-    /// Unbans given ip address(es)
+    /// Unban given ip address(es)
     /// No confirmation to expect.
     pub async fn node_unban_by_ip(&self, ips: Vec<IpAddr>) -> RpcResult<()> {
         self.call_method("node_unban_by_ip", "()", vec![ips]).await
     }
 
-    /// Unbans given node id(s)
+    /// Unban given node id(s)
     /// No confirmation to expect.
     pub async fn node_unban_by_id(&self, ids: Vec<NodeId>) -> RpcResult<()> {
         self.call_method("node_unban_by_id", "()", vec![ids]).await
@@ -171,7 +173,7 @@ impl RpcClient {
     // Debug (specific information)
 
     /// Returns the active stakers and their roll counts for the current cycle.
-    pub(crate) async fn _get_stakers(&self) -> RpcResult<Map<Address, u64>> {
+    pub(crate) async fn _get_stakers(&self) -> RpcResult<PreHashMap<Address, u64>> {
         self.call_method("get_stakers", "Map<Address, u64>", ())
             .await
     }

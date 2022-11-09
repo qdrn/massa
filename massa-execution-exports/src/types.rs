@@ -4,7 +4,37 @@
 
 use crate::event_store::EventStore;
 use massa_final_state::StateChanges;
-use massa_models::{Address, Amount, BlockId, Slot};
+use massa_models::datastore::Datastore;
+use massa_models::{
+    address::Address, address::ExecutionAddressCycleInfo, amount::Amount, block::BlockId,
+    slot::Slot,
+};
+use std::collections::{BTreeMap, BTreeSet};
+
+/// Execution info about an address
+#[derive(Clone, Debug)]
+pub struct ExecutionAddressInfo {
+    /// candidate balance of the address
+    pub candidate_balance: Amount,
+    /// final balance of the address
+    pub final_balance: Amount,
+
+    /// final number of rolls the address has
+    pub final_roll_count: u64,
+    /// final datastore keys of the address
+    pub final_datastore_keys: BTreeSet<Vec<u8>>,
+
+    /// candidate number of rolls the address has
+    pub candidate_roll_count: u64,
+    /// candidate datastore keys of the address
+    pub candidate_datastore_keys: BTreeSet<Vec<u8>>,
+
+    /// future deferred credits
+    pub future_deferred_credits: BTreeMap<Slot, Amount>,
+
+    /// cycle information
+    pub cycle_infos: Vec<ExecutionAddressCycleInfo>,
+}
 
 /// structure describing the output of a single execution
 #[derive(Debug, Clone)]
@@ -17,6 +47,15 @@ pub struct ExecutionOutput {
     pub state_changes: StateChanges,
     /// events emitted by the execution step
     pub events: EventStore,
+}
+
+/// structure describing the output of a read only execution
+#[derive(Debug, Clone)]
+pub struct ReadOnlyExecutionOutput {
+    /// Output of a single execution
+    pub out: ExecutionOutput,
+    /// Gas cost for this execution
+    pub gas_cost: u64,
 }
 
 /// structure describing different types of read-only execution request
@@ -83,8 +122,10 @@ pub struct ExecutionStackElement {
     /// to allow write access on newly created addresses in order to set them up,
     /// but only within the scope of the current stack element.
     /// That way, only the current scope and neither its caller not the functions it calls gain this write access,
-    /// which is important for security.  
+    /// which is important for security.
     /// Note that we use a vector instead of a pre-hashed set to ensure order determinism,
     /// the performance hit of linear search remains minimal because `owned_addresses` will always contain very few elements.
     pub owned_addresses: Vec<Address>,
+    /// Datastore (key value store) for `ExecuteSC` Operation
+    pub operation_datastore: Option<Datastore>,
 }

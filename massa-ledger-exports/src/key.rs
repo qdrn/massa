@@ -1,7 +1,6 @@
 use massa_models::{
-    address::AddressDeserializer,
-    constants::{default::MAX_DATASTORE_KEY_LENGTH, ADDRESS_SIZE_BYTES},
-    Address, VecU8Deserializer, VecU8Serializer,
+    address::{Address, AddressDeserializer, ADDRESS_SIZE_BYTES},
+    serialization::{VecU8Deserializer, VecU8Serializer},
 };
 use massa_serialization::{DeserializeError, Deserializer, SerializeError, Serializer};
 use nom::error::{ContextError, ParseError};
@@ -21,7 +20,7 @@ macro_rules! balance_key {
 
 /// Bytecode key formatting macro
 ///
-/// NOTE: still handle separate bytecode for now to avoid too many refactoring at once
+/// NOTE: still handle separate bytecode for now to avoid too many refactor at once
 #[macro_export]
 macro_rules! bytecode_key {
     ($addr:expr) => {
@@ -31,7 +30,7 @@ macro_rules! bytecode_key {
 
 /// Datastore entry key formatting macro
 ///
-/// TODO: add a separator identifier if the need comes to have multiple datastores
+/// TODO: add a separator identifier if the need comes to have multiple datastore
 #[macro_export]
 macro_rules! data_key {
     ($addr:expr, $key:expr) => {
@@ -57,7 +56,7 @@ pub fn get_address_from_key(key: &[u8]) -> Option<Address> {
 }
 
 /// Basic key serializer
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct KeySerializer {
     vec_u8_serializer: VecU8Serializer,
 }
@@ -106,25 +105,20 @@ impl Serializer<Vec<u8>> for KeySerializer {
 }
 
 /// Basic key deserializer
+#[derive(Clone)]
 pub struct KeyDeserializer {
     address_deserializer: AddressDeserializer,
-    vec_u8_deserializer: VecU8Deserializer,
-}
-
-impl Default for KeyDeserializer {
-    fn default() -> Self {
-        Self::new()
-    }
+    datastore_key_deserializer: VecU8Deserializer,
 }
 
 impl KeyDeserializer {
     /// Creates a new `KeyDeserializer`
-    pub fn new() -> Self {
+    pub fn new(max_datastore_key_length: u8) -> Self {
         Self {
             address_deserializer: AddressDeserializer::new(),
-            vec_u8_deserializer: VecU8Deserializer::new(
+            datastore_key_deserializer: VecU8Deserializer::new(
                 Included(u64::MIN),
-                Included(MAX_DATASTORE_KEY_LENGTH as u64),
+                Included(max_datastore_key_length as u64),
             ),
         }
     }
@@ -132,6 +126,7 @@ impl KeyDeserializer {
 
 // TODO: deserialize keys into a rust type
 impl Deserializer<Vec<u8>> for KeyDeserializer {
+    /// ## Example
     /// ```
     /// use massa_models::address::Address;
     /// use massa_ledger_exports::{KeyDeserializer, KeySerializer, DATASTORE_IDENT, BALANCE_IDENT};
@@ -148,7 +143,7 @@ impl Deserializer<Vec<u8>> for KeyDeserializer {
     /// key.push(DATASTORE_IDENT);
     /// key.extend(store_key.to_bytes());
     /// KeySerializer::new().serialize(&key, &mut serialized).unwrap();
-    /// let (rest, key_deser) = KeyDeserializer::new().deserialize::<DeserializeError>(&serialized).unwrap();
+    /// let (rest, key_deser) = KeyDeserializer::new(255).deserialize::<DeserializeError>(&serialized).unwrap();
     /// assert!(rest.is_empty());
     /// assert_eq!(key_deser, key);
     ///
@@ -157,7 +152,7 @@ impl Deserializer<Vec<u8>> for KeyDeserializer {
     /// key.extend(address.to_bytes());
     /// key.push(BALANCE_IDENT);
     /// KeySerializer::new().serialize(&key, &mut serialized).unwrap();
-    /// let (rest, key_deser) = KeyDeserializer::new().deserialize::<DeserializeError>(&serialized).unwrap();
+    /// let (rest, key_deser) = KeyDeserializer::new(255).deserialize::<DeserializeError>(&serialized).unwrap();
     /// assert!(rest.is_empty());
     /// assert_eq!(key_deser, key);
     /// ```
@@ -175,7 +170,7 @@ impl Deserializer<Vec<u8>> for KeyDeserializer {
                 BALANCE_IDENT => Ok((&rest[1..], balance_key!(address))),
                 BYTECODE_IDENT => Ok((&rest[1..], bytecode_key!(address))),
                 DATASTORE_IDENT => {
-                    let (rest, hash) = self.vec_u8_deserializer.deserialize(&rest[1..])?;
+                    let (rest, hash) = self.datastore_key_deserializer.deserialize(&rest[1..])?;
                     Ok((rest, data_key!(address, hash)))
                 }
                 _ => Err(error),

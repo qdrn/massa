@@ -1,7 +1,7 @@
 // Copyright (c) 2022 MASSA LABS <info@massa.net>
 
 use crate::error::MassaSignatureError;
-use ed25519_dalek::{Signer, Verifier};
+use ed25519_dalek::{verify_batch, Signer, Verifier};
 use massa_hash::Hash;
 use massa_serialization::{
     DeserializeError, Deserializer, Serializer, U64VarIntDeserializer, U64VarIntSerializer,
@@ -25,9 +25,7 @@ pub const PUBLIC_KEY_SIZE_BYTES: usize = ed25519_dalek::PUBLIC_KEY_LENGTH;
 pub const SECRET_KEY_BYTES_SIZE: usize = ed25519_dalek::SECRET_KEY_LENGTH;
 /// Size of a signature
 pub const SIGNATURE_SIZE_BYTES: usize = ed25519_dalek::SIGNATURE_LENGTH;
-
-const SIGNATURE_STRING_PREFIX: &str = "SIG";
-/// `KeyPair` is used for signature and decrypting
+/// `KeyPair` is used for signature and decryption
 pub struct KeyPair(ed25519_dalek::Keypair);
 
 impl Clone for KeyPair {
@@ -78,19 +76,23 @@ impl FromStr for KeyPair {
                         .with_check(None)
                         .into_vec()
                         .map_err(|_| {
-                            MassaSignatureError::ParsingError("Bad secret key bs58".to_owned())
+                            MassaSignatureError::ParsingError(format!("bad secret key bs58: {}", s))
                         })?;
                 let u64_deserializer = U64VarIntDeserializer::new(Included(0), Included(u64::MAX));
                 let (rest, _version) = u64_deserializer
                     .deserialize::<DeserializeError>(&decoded_bs58_check[..])
                     .map_err(|err| MassaSignatureError::ParsingError(err.to_string()))?;
                 KeyPair::from_bytes(&rest.try_into().map_err(|_| {
-                    MassaSignatureError::ParsingError("Secret key not long enough".to_string())
+                    MassaSignatureError::ParsingError(format!(
+                        "secret key not long enough for: {}",
+                        s
+                    ))
                 })?)
             }
-            _ => Err(MassaSignatureError::ParsingError(
-                "Bad secret prefix".to_owned(),
-            )),
+            _ => Err(MassaSignatureError::ParsingError(format!(
+                "bad secret prefix for: {}",
+                s
+            ))),
         }
     }
 }
@@ -114,7 +116,7 @@ impl KeyPair {
     }
 
     /// Returns the Signature produced by signing
-    /// data bytes with a KeyPair.
+    /// data bytes with a `KeyPair`.
     ///
     /// # Example
     ///  ```
@@ -183,7 +185,7 @@ impl KeyPair {
         PublicKey(self.0.public)
     }
 
-    /// Encode a keypair into his base58 form
+    /// Encode a keypair into his `base58` form
     ///
     /// # Example
     /// ```
@@ -195,7 +197,7 @@ impl KeyPair {
         bs58::encode(self.to_bytes()).with_check().into_string()
     }
 
-    /// Decode a base58 encoded keypair
+    /// Decode a `base58` encoded keypair
     ///
     /// # Example
     /// ```
@@ -445,7 +447,7 @@ impl PublicKey {
         signature: &Signature,
     ) -> Result<(), MassaSignatureError> {
         self.0.verify(hash.to_bytes(), &signature.0).map_err(|err| {
-            MassaSignatureError::SignatureError(format!("Signature failed: {}", err))
+            MassaSignatureError::SignatureError(format!("Signature verification failed: {}", err))
         })
     }
 
@@ -672,33 +674,14 @@ pub struct Signature(ed25519_dalek::Signature);
 
 impl std::fmt::Display for Signature {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        if cfg!(feature = "hash-prefix") {
-            write!(f, "{}-{}", SIGNATURE_STRING_PREFIX, self.to_bs58_check())
-        } else {
-            write!(f, "{}", self.to_bs58_check())
-        }
+        write!(f, "{}", self.to_bs58_check())
     }
 }
 
 impl FromStr for Signature {
     type Err = MassaSignatureError;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if cfg!(feature = "hash-prefix") {
-            let v: Vec<_> = s.split('-').collect();
-            if v.len() != 2 {
-                // assume there is no prefix
-                Signature::from_bs58_check(s)
-            } else if v[0] != SIGNATURE_STRING_PREFIX {
-                Err(MassaSignatureError::WrongPrefix(
-                    SIGNATURE_STRING_PREFIX.to_string(),
-                    v[0].to_string(),
-                ))
-            } else {
-                Signature::from_bs58_check(v[1])
-            }
-        } else {
-            Signature::from_bs58_check(s)
-        }
+        Signature::from_bs58_check(s)
     }
 }
 
@@ -960,6 +943,45 @@ impl Deserializer<Signature> for SignatureDeserializer {
         // Safe because the signature deserialization success
         Ok((&buffer[SIGNATURE_SIZE_BYTES..], signature))
     }
+}
+
+/// Verify a batch of signatures on a single core to gain total CPU performance.
+/// Every provided triplet `(hash, signature, public_key)` is verified
+/// and an error is returned if at least one of them fails.
+///
+/// # Arguments
+/// * `batch`: a slice of triplets `(hash, signature, public_key)`
+///
+/// # Return value
+/// Returns `Ok(())` if all signatures were successfully verified,
+/// and `Err(MassaSignatureError::SignatureError(_))` if at least one of them failed.
+pub fn verify_signature_batch(
+    batch: &[(Hash, Signature, PublicKey)],
+) -> Result<(), MassaSignatureError> {
+    // nothing to verify
+    if batch.is_empty() {
+        return Ok(());
+    }
+
+    // normal verif is fastest for size 1 batches
+    if batch.len() == 1 {
+        let (hash, signature, public_key) = batch[0];
+        return public_key.verify_signature(&hash, &signature);
+    }
+
+    // otherwise, use batch verif
+
+    let mut hashes = Vec::with_capacity(batch.len());
+    let mut signatures = Vec::with_capacity(batch.len());
+    let mut public_keys = Vec::with_capacity(batch.len());
+    batch.iter().for_each(|(hash, signature, public_key)| {
+        hashes.push(hash.to_bytes().as_slice());
+        signatures.push(signature.0);
+        public_keys.push(public_key.0);
+    });
+    verify_batch(&hashes, signatures.as_slice(), public_keys.as_slice()).map_err(|err| {
+        MassaSignatureError::SignatureError(format!("Batch signature verification failed: {}", err))
+    })
 }
 
 #[cfg(test)]

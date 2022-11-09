@@ -2,14 +2,19 @@
 
 use crate::error::MassaHashError;
 use crate::settings::HASH_SIZE_BYTES;
-use massa_serialization::Deserializer;
+use massa_serialization::{Deserializer, SerializeError, Serializer};
 use nom::{
     error::{context, ContextError, ParseError},
     IResult,
 };
-use std::{cmp::Ordering, convert::TryInto, str::FromStr};
+use std::{
+    cmp::Ordering,
+    convert::TryInto,
+    ops::{BitXor, BitXorAssign},
+    str::FromStr,
+};
 
-/// Hash wrapper, the underlying hash type is Blake3
+/// Hash wrapper, the underlying hash type is `Blake3`
 #[derive(Eq, PartialEq, Copy, Clone, Hash)]
 pub struct Hash(blake3::Hash);
 
@@ -34,6 +39,28 @@ impl std::fmt::Display for Hash {
 impl std::fmt::Debug for Hash {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(f, "{}", self.to_bs58_check())
+    }
+}
+
+impl BitXorAssign for Hash {
+    fn bitxor_assign(&mut self, rhs: Self) {
+        *self = *self ^ rhs;
+    }
+}
+
+impl BitXor for Hash {
+    type Output = Self;
+
+    fn bitxor(self, other: Self) -> Self {
+        let xored_bytes: Vec<u8> = self
+            .to_bytes()
+            .iter()
+            .zip(other.to_bytes())
+            .map(|(x, y)| x ^ y)
+            .collect();
+        // unwrap won't fail because of the intial byte arrays size
+        let input_bytes: [u8; HASH_SIZE_BYTES] = xored_bytes.try_into().unwrap();
+        Hash::from_bytes(&input_bytes)
     }
 }
 
@@ -123,8 +150,26 @@ impl Hash {
     }
 }
 
-/// Deserializer for `Hash`
+/// Serializer for `Hash`
 #[derive(Default)]
+pub struct HashSerializer;
+
+impl HashSerializer {
+    /// Creates a serializer for `Hash`
+    pub const fn new() -> Self {
+        Self
+    }
+}
+
+impl Serializer<Hash> for HashSerializer {
+    fn serialize(&self, value: &Hash, buffer: &mut Vec<u8>) -> Result<(), SerializeError> {
+        buffer.extend(value.to_bytes());
+        Ok(())
+    }
+}
+
+/// Deserializer for `Hash`
+#[derive(Default, Clone)]
 pub struct HashDeserializer;
 
 impl HashDeserializer {
@@ -135,6 +180,17 @@ impl HashDeserializer {
 }
 
 impl Deserializer<Hash> for HashDeserializer {
+    /// ## Example
+    /// ```rust
+    /// use massa_hash::{Hash, HashDeserializer};
+    /// use massa_serialization::{Serializer, Deserializer, DeserializeError};
+    ///
+    /// let hash_deserializer = HashDeserializer::new();
+    /// let hash = Hash::compute_from(&"hello world".as_bytes());
+    /// let (rest, deserialized) = hash_deserializer.deserialize::<DeserializeError>(hash.to_bytes()).unwrap();
+    /// assert_eq!(deserialized, hash);
+    /// assert_eq!(rest.len(), 0);
+    /// ```
     fn deserialize<'a, E: ParseError<&'a [u8]> + ContextError<&'a [u8]>>(
         &self,
         buffer: &'a [u8],

@@ -6,11 +6,13 @@
 //! See the definition of Interface in the massa-sc-runtime crate for functional details.
 
 use crate::context::ExecutionContext;
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Result};
 use massa_async_pool::AsyncMessage;
 use massa_execution_exports::ExecutionConfig;
 use massa_execution_exports::ExecutionStackElement;
-use massa_models::{timeslots::get_block_slot_timestamp, Address, Amount, Slot};
+use massa_models::{
+    address::Address, amount::Amount, slot::Slot, timeslots::get_block_slot_timestamp,
+};
 use massa_sc_runtime::{Interface, InterfaceClone};
 use parking_lot::Mutex;
 use rand::Rng;
@@ -70,13 +72,13 @@ impl Interface for InterfaceImpl {
     ///
     /// # Arguments
     /// * `address`: string representation of the target address on which the bytecode will be called
-    /// * `raw_coins`: raw representation (without decimal factor) of the amount of parallel coins to transfer from the caller address to the target address at the beginning of the call
+    /// * `raw_coins`: raw representation (without decimal factor) of the amount of coins to transfer from the caller address to the target address at the beginning of the call
     ///
     /// # Returns
     /// The target bytecode or an error
     fn init_call(&self, address: &str, raw_coins: u64) -> Result<Vec<u8>> {
         // get target address
-        let to_address = massa_models::Address::from_str(address)?;
+        let to_address = massa_models::address::Address::from_str(address)?;
 
         // write-lock context
         let mut context = context_guard!(self);
@@ -94,12 +96,11 @@ impl Interface for InterfaceImpl {
         };
 
         // transfer coins from caller to target address
-        let coins = massa_models::Amount::from_raw(raw_coins);
-        if let Err(err) =
-            context.transfer_parallel_coins(Some(from_address), Some(to_address), coins)
+        let coins = massa_models::amount::Amount::from_raw(raw_coins);
+        if let Err(err) = context.transfer_coins(Some(from_address), Some(to_address), coins, true)
         {
             bail!(
-                "error transferring {} parallel coins from {} to {}: {}",
+                "error transferring {} coins from {} to {}: {}",
                 coins,
                 from_address,
                 to_address,
@@ -112,6 +113,7 @@ impl Interface for InterfaceImpl {
             address: to_address,
             coins,
             owned_addresses: vec![to_address],
+            operation_datastore: None,
         });
 
         // return the target bytecode
@@ -130,32 +132,29 @@ impl Interface for InterfaceImpl {
         Ok(())
     }
 
-    /// Gets the parallel balance of the current address address (top of the stack).
+    /// Gets the balance of the current address address (top of the stack).
     ///
     /// # Returns
-    /// The raw representation (no decimal factor) of the parallel balance of the address,
+    /// The raw representation (no decimal factor) of the balance of the address,
     /// or zero if the address is not found in the ledger.
     fn get_balance(&self) -> Result<u64> {
         let context = context_guard!(self);
         let address = context.get_current_address()?;
-        Ok(context
-            .get_parallel_balance(&address)
-            .unwrap_or_default()
-            .to_raw())
+        Ok(context.get_balance(&address).unwrap_or_default().to_raw())
     }
 
-    /// Gets the parallel balance of arbitrary address passed as argument.
+    /// Gets the balance of arbitrary address passed as argument.
     ///
     /// # Arguments
     /// * address: string representation of the address for which to get the balance
     ///
     /// # Returns
-    /// The raw representation (no decimal factor) of the parallel balance of the address,
+    /// The raw representation (no decimal factor) of the balance of the address,
     /// or zero if the address is not found in the ledger.
     fn get_balance_for(&self, address: &str) -> Result<u64> {
-        let address = massa_models::Address::from_str(address)?;
+        let address = massa_models::address::Address::from_str(address)?;
         Ok(context_guard!(self)
-            .get_parallel_balance(&address)
+            .get_balance(&address)
             .unwrap_or_default()
             .to_raw())
     }
@@ -184,7 +183,7 @@ impl Interface for InterfaceImpl {
     /// # Returns
     /// The datastore value matching the provided key, if found, otherwise an error.
     fn raw_get_data_for(&self, address: &str, key: &str) -> Result<Vec<u8>> {
-        let addr = &massa_models::Address::from_str(address)?;
+        let addr = &massa_models::address::Address::from_str(address)?;
         let context = context_guard!(self);
         match context.get_data_entry(addr, key.as_bytes()) {
             Some(value) => Ok(value),
@@ -201,7 +200,7 @@ impl Interface for InterfaceImpl {
     /// * key: string key of the datastore entry to set
     /// * value: new value to set
     fn raw_set_data_for(&self, address: &str, key: &str, value: &[u8]) -> Result<()> {
-        let addr = massa_models::Address::from_str(address)?;
+        let addr = massa_models::address::Address::from_str(address)?;
         let mut context = context_guard!(self);
         context.set_data_entry(&addr, key.as_bytes().to_vec(), value.to_vec())?;
         Ok(())
@@ -215,7 +214,7 @@ impl Interface for InterfaceImpl {
     /// * key: string key of the datastore entry
     /// * value: value to append
     fn raw_append_data_for(&self, address: &str, key: &str, value: &[u8]) -> Result<()> {
-        let addr = massa_models::Address::from_str(address)?;
+        let addr = massa_models::address::Address::from_str(address)?;
         context_guard!(self).append_data_entry(&addr, key.as_bytes().to_vec(), value.to_vec())?;
         Ok(())
     }
@@ -227,7 +226,7 @@ impl Interface for InterfaceImpl {
     /// * address: string representation of the address
     /// * key: string key of the datastore entry to delete
     fn raw_delete_data_for(&self, address: &str, key: &str) -> Result<()> {
-        let addr = &massa_models::Address::from_str(address)?;
+        let addr = &massa_models::address::Address::from_str(address)?;
         context_guard!(self).delete_data_entry(addr, key.as_bytes())?;
         Ok(())
     }
@@ -241,7 +240,7 @@ impl Interface for InterfaceImpl {
     /// # Returns
     /// true if the address exists and has the entry matching the provided key in its datastore, otherwise false
     fn has_data_for(&self, address: &str, key: &str) -> Result<bool> {
-        let addr = massa_models::Address::from_str(address)?;
+        let addr = massa_models::address::Address::from_str(address)?;
         let context = context_guard!(self);
         Ok(context.has_data_entry(&addr, key.as_bytes()))
     }
@@ -316,6 +315,68 @@ impl Interface for InterfaceImpl {
         Ok(context.has_data_entry(&addr, key.as_bytes()))
     }
 
+    /// Get the operation datastore keys (aka entries).
+    /// Note that the datastore is only accessible to the initial caller level.
+    ///
+    /// # Returns
+    /// A list of keys (keys are byte arrays)
+    fn get_op_keys(&self) -> Result<Vec<Vec<u8>>> {
+        let context = context_guard!(self);
+        let stack = context.stack.last().ok_or_else(|| anyhow!("No stack"))?;
+        let datastore = stack
+            .operation_datastore
+            .as_ref()
+            .ok_or_else(|| anyhow!("No datastore in stack"))?;
+        let keys: Vec<Vec<u8>> = datastore.keys().cloned().collect();
+        debug!("[abi get_op_keys] keys {:?}", keys);
+        Ok(keys)
+    }
+
+    /// Checks if an operation datastore entry exists in the operation datastore.
+    /// Note that the datastore is only accessible to the initial caller level.
+    ///
+    /// # Arguments
+    /// * key: byte array key of the datastore entry to retrieve
+    ///
+    /// # Returns
+    /// true if the entry is matching the provided key in its operation datastore, otherwise false
+    fn has_op_key(&self, key: &[u8]) -> Result<bool> {
+        debug!("[abi has_op_key] checking key {:?}", key);
+        let context = context_guard!(self);
+        let stack = context.stack.last().ok_or_else(|| anyhow!("No stack"))?;
+        let datastore = stack
+            .operation_datastore
+            .as_ref()
+            .ok_or_else(|| anyhow!("No datastore in stack"))?;
+        let has_key = datastore.contains_key(key);
+        debug!("[abi has_op_key] has key {}", has_key);
+        Ok(has_key)
+    }
+
+    /// Gets an operation datastore value by key.
+    /// Note that the datastore is only accessible to the initial caller level.
+    ///
+    /// # Arguments
+    /// * key: byte array key of the datastore entry to retrieve
+    ///
+    /// # Returns
+    /// The operation datastore value matching the provided key, if found, otherwise an error.
+    fn get_op_data(&self, key: &[u8]) -> Result<Vec<u8>> {
+        debug!("[abi get_op_data] data for {:?}", key);
+        let context = context_guard!(self);
+        let stack = context.stack.last().ok_or_else(|| anyhow!("No stack"))?;
+        let datastore = stack
+            .operation_datastore
+            .as_ref()
+            .ok_or_else(|| anyhow!("No datastore in stack"))?;
+        let data = datastore
+            .get(key)
+            .cloned()
+            .ok_or_else(|| anyhow!("Unknown key: {:?}", key));
+        debug!("[abi get_op_data] has key {:?}", data);
+        data
+    }
+
     /// Hashes arbitrary data
     ///
     /// # Arguments
@@ -336,7 +397,7 @@ impl Interface for InterfaceImpl {
     /// The string representation of the resulting address
     fn address_from_public_key(&self, public_key: &str) -> Result<String> {
         let public_key = massa_signature::PublicKey::from_bs58_check(public_key)?;
-        let addr = massa_models::Address::from_public_key(&public_key);
+        let addr = massa_models::address::Address::from_public_key(&public_key);
         Ok(addr.to_string())
     }
 
@@ -362,21 +423,21 @@ impl Interface for InterfaceImpl {
         Ok(public_key.verify_signature(&h, &signature).is_ok())
     }
 
-    /// Transfer parallel coins from the current address (top of the call stack) towards a target address.
+    /// Transfer coins from the current address (top of the call stack) towards a target address.
     ///
     /// # Arguments
     /// * `to_address`: string representation of the address to which the coins are sent
     /// * `raw_amount`: raw representation (no decimal factor) of the amount of coins to transfer
     fn transfer_coins(&self, to_address: &str, raw_amount: u64) -> Result<()> {
-        let to_address = massa_models::Address::from_str(to_address)?;
-        let amount = massa_models::Amount::from_raw(raw_amount);
+        let to_address = massa_models::address::Address::from_str(to_address)?;
+        let amount = massa_models::amount::Amount::from_raw(raw_amount);
         let mut context = context_guard!(self);
         let from_address = context.get_current_address()?;
-        context.transfer_parallel_coins(Some(from_address), Some(to_address), amount)?;
+        context.transfer_coins(Some(from_address), Some(to_address), amount, true)?;
         Ok(())
     }
 
-    /// Transfer parallel coins from a given address towards a target address.
+    /// Transfer coins from a given address towards a target address.
     ///
     /// # Arguments
     /// * `from_address`: string representation of the address that is sending the coins
@@ -388,11 +449,11 @@ impl Interface for InterfaceImpl {
         to_address: &str,
         raw_amount: u64,
     ) -> Result<()> {
-        let from_address = massa_models::Address::from_str(from_address)?;
-        let to_address = massa_models::Address::from_str(to_address)?;
-        let amount = massa_models::Amount::from_raw(raw_amount);
+        let from_address = massa_models::address::Address::from_str(from_address)?;
+        let to_address = massa_models::address::Address::from_str(to_address)?;
+        let amount = massa_models::amount::Amount::from_raw(raw_amount);
         let mut context = context_guard!(self);
-        context.transfer_parallel_coins(Some(from_address), Some(to_address), amount)?;
+        context.transfer_coins(Some(from_address), Some(to_address), amount, true)?;
         Ok(())
     }
 
@@ -467,6 +528,16 @@ impl Interface for InterfaceImpl {
         Ok(context_guard!(self).unsafe_rng.sample(distr))
     }
 
+    /// Returns a pseudo-random deterministic `f64` number
+    ///
+    /// # Warning
+    /// This random number generator is unsafe:
+    /// it can be both predicted and manipulated before the execution
+    fn unsafe_random_f64(&self) -> Result<f64> {
+        let distr = rand::distributions::Uniform::new(0f64, 1f64);
+        Ok(context_guard!(self).unsafe_rng.sample(distr))
+    }
+
     /// Adds an asynchronous message to the context speculative asynchronous pool
     ///
     /// # Arguments
@@ -499,6 +570,8 @@ impl Interface for InterfaceImpl {
         let emission_slot = execution_context.slot;
         let emission_index = execution_context.created_message_index;
         let sender = execution_context.get_current_address()?;
+        let coins = Amount::from_raw(raw_coins);
+        execution_context.transfer_coins(Some(sender), None, coins, true)?;
         execution_context.push_new_message(AsyncMessage {
             emission_slot,
             emission_index,
@@ -509,7 +582,7 @@ impl Interface for InterfaceImpl {
             validity_end: Slot::new(validity_end.0, validity_end.1),
             max_gas,
             gas_price: Amount::from_raw(gas_price),
-            coins: Amount::from_raw(raw_coins),
+            coins,
             data: data.to_vec(),
         });
         execution_context.created_message_index += 1;
@@ -541,7 +614,7 @@ impl Interface for InterfaceImpl {
     /// Sets the bytecode of an arbitrary address.
     /// Fails if the address does not exist of if the context doesn't have write access rights on it.
     fn raw_set_bytecode_for(&self, address: &str, bytecode: &[u8]) -> Result<()> {
-        let address = massa_models::Address::from_str(address)?;
+        let address = massa_models::address::Address::from_str(address)?;
         let mut execution_context = context_guard!(self);
         match execution_context.set_bytecode(&address, bytecode.to_vec()) {
             Ok(()) => Ok(()),

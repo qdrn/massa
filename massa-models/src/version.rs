@@ -1,6 +1,6 @@
 // Copyright (c) 2022 MASSA LABS <info@massa.net>
 
-use crate::ModelsError;
+use crate::error::ModelsError;
 use massa_serialization::{Deserializer, Serializer, U32VarIntDeserializer, U32VarIntSerializer};
 use nom::bytes::complete::take;
 use nom::error::context;
@@ -88,9 +88,9 @@ impl Serializer<Version> for VersionSerializer {
     /// use std::ops::Bound::Included;
     /// use std::str::FromStr;
     /// use massa_serialization::Serializer;
-    /// use massa_models::{Version, VersionSerializer};
+    /// use massa_models::version::{Version, VersionSerializer};
     ///
-    /// let version: Version = Version::from_str("TEST.1.0").unwrap();
+    /// let version: Version = Version::from_str("TEST.1.10").unwrap();
     /// let serializer = VersionSerializer::new();
     /// let mut buffer = Vec::new();
     /// serializer.serialize(&version, &mut buffer).unwrap();
@@ -116,7 +116,7 @@ impl VersionDeserializer {
     /// Creates a `VersionSerializer`
     pub const fn new() -> Self {
         Self {
-            u32_deserializer: U32VarIntDeserializer::new(Included(0), Included(1000)),
+            u32_deserializer: U32VarIntDeserializer::new(Included(0), Included(u32::MAX)),
         }
     }
 }
@@ -132,9 +132,9 @@ impl Deserializer<Version> for VersionDeserializer {
     /// use std::ops::Bound::Included;
     /// use std::str::FromStr;
     /// use massa_serialization::{Serializer, Deserializer, DeserializeError};
-    /// use massa_models::{Version, VersionSerializer, VersionDeserializer};
+    /// use massa_models::version::{Version, VersionSerializer, VersionDeserializer};
     ///
-    /// let version: Version = Version::from_str("TEST.1.3").unwrap();
+    /// let version: Version = Version::from_str("TEST.1.10").unwrap();
     /// let mut serialized = Vec::new();
     /// let serializer = VersionSerializer::new();
     /// let deserializer = VersionDeserializer::new();
@@ -197,8 +197,8 @@ impl fmt::Display for Version {
     /// ```rust
     /// # use massa_models::*;
     /// # use std::str::FromStr;
-    /// let v: Version = Version::from_str("TEST.1.2").unwrap();
-    /// assert_eq!(v.to_string(), "TEST.1.2");
+    /// let v: version::Version = version::Version::from_str("TEST.1.10").unwrap();
+    /// assert_eq!(v.to_string(), "TEST.1.10");
     /// ```
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let network_str: String = self.instance.iter().cloned().collect();

@@ -1,7 +1,7 @@
 // Copyright (c) 2022 MASSA LABS <info@massa.net>
 
 use massa_ledger_exports::{LedgerConfig, LedgerController, LedgerEntry};
-use massa_models::Address;
+use massa_models::address::Address;
 use std::collections::HashMap;
 use tempfile::TempDir;
 
@@ -10,24 +10,26 @@ use crate::{ledger_db::LedgerDB, FinalLedger};
 /// This file defines tools to test the ledger bootstrap
 
 pub fn create_final_ledger(
-    initial_ledger: Option<HashMap<Address, LedgerEntry>>,
     config: LedgerConfig,
+    initial_ledger: HashMap<Address, LedgerEntry>,
 ) -> FinalLedger {
     let temp_dir = TempDir::new().unwrap();
-    let mut db = LedgerDB::new(temp_dir.path().to_path_buf());
-    db.set_initial_ledger(initial_ledger.unwrap_or_default());
+    let mut db = LedgerDB::new(
+        temp_dir.path().to_path_buf(),
+        config.thread_count,
+        config.max_key_length,
+        config.max_ledger_part_size,
+    );
+    db.load_initial_ledger(initial_ledger);
     FinalLedger {
-        _config: config,
+        config,
         sorted_ledger: db,
     }
 }
 
 /// asserts that two ledger entries are the same
 pub fn assert_eq_ledger_entry(v1: &LedgerEntry, v2: &LedgerEntry) {
-    assert_eq!(
-        v1.parallel_balance, v2.parallel_balance,
-        "parallel balance mismatch"
-    );
+    assert_eq!(v1.balance, v2.balance, "balance mismatch");
     assert_eq!(v1.bytecode, v2.bytecode, "bytecode mismatch");
     assert_eq!(
         v1.datastore.len(),
@@ -42,7 +44,7 @@ pub fn assert_eq_ledger_entry(v1: &LedgerEntry, v2: &LedgerEntry) {
 }
 
 /// asserts that two `FinalLedgerBootstrapState` are equal
-pub fn assert_eq_ledger(v1: &Box<dyn LedgerController>, v2: &Box<dyn LedgerController>) {
+pub fn assert_eq_ledger(v1: &dyn LedgerController, v2: &dyn LedgerController) {
     let ledger1: HashMap<Address, LedgerEntry> = v1
         .get_every_address()
         .iter()
@@ -50,7 +52,7 @@ pub fn assert_eq_ledger(v1: &Box<dyn LedgerController>, v2: &Box<dyn LedgerContr
             (
                 *addr,
                 LedgerEntry {
-                    parallel_balance: *balance,
+                    balance: *balance,
                     bytecode: v1.get_bytecode(addr).unwrap_or_default(),
                     datastore: v1.get_entire_datastore(addr),
                 },
@@ -64,7 +66,7 @@ pub fn assert_eq_ledger(v1: &Box<dyn LedgerController>, v2: &Box<dyn LedgerContr
             (
                 *addr,
                 LedgerEntry {
-                    parallel_balance: *balance,
+                    balance: *balance,
                     bytecode: v2.get_bytecode(addr).unwrap_or_default(),
                     datastore: v2.get_entire_datastore(addr),
                 },
