@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":[["start_network_controller","Starts a new `NetworkWorker` in a spawned task"]]};
