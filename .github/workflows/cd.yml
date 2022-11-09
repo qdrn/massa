@@ -29,7 +29,6 @@ jobs:
             target: x86_64-pc-windows-gnu
             name: release_windows.zip
           - os: macOS-latest
-            platform: x86_64
             target: x86_64-apple-darwin
             name: release_macos.tar.gz
           - os: macOS-latest
